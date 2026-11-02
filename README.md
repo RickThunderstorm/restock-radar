@@ -28,6 +28,18 @@ In den Einstellungen: **Mit Windows starten** einschalten, dann läuft es nach j
 
 Pro Produkt lässt sich **Laut** oder **Leise** wählen (Glocken-Symbol).
 
+### Suchaufträge: Produkte finden, für die es noch keinen Link gibt
+
+Viele Drops sind neue Produktseiten. Statt eines Links kannst du deshalb einen **Suchbegriff** anlegen (Umschalter „Suchbegriff“ oben):
+
+1. Einstellungen → **Shops für Suchaufträge**: die Kartenshops hinzufügen, denen du vertraust. Restock-Radar erkennt das Shopsystem und macht eine Probesuche.
+2. Suchbegriff eingeben, z. B. `Prismatische Entwicklungen | Prismatic Evolutions`. Mehrere Schreibweisen trennst du mit `|`.
+3. Filter wählen: **Produkttyp** (Display, Top-Trainer-Box, Booster-Bundle …), **Sprache**, optional **Höchstpreis** und **Ohne diese Wörter** (z. B. `PSA, gradiert`).
+
+Beim ersten Durchlauf werden die vorhandenen Treffer still erfasst. Danach meldet Restock-Radar **neu auftauchende Produkte** (laut, wenn sie kaufbar sind) und **wieder verfügbare** Treffer. Ein Treffer lässt sich mit einem Klick als normales Produkt überwachen. Mit „Neue Treffer automatisch überwachen“ passiert das von selbst.
+
+Shopify- und WooCommerce-Shops werden über ihre Such-Schnittstelle abgefragt, alle anderen über die normale Suchseite. Pro Shop und Durchlauf geht nur eine Anfrage raus, alle 3 Minuten. Bremst ein Shop, pausiert er automatisch.
+
 ### Vom Handy aus
 
 Einstellungen → **Handy-Zugriff im WLAN** einschalten → QR-Code scannen. Das Handy wird dauerhaft freigeschaltet, fremde Geräte im WLAN kommen ohne den Code nicht rein. Beim ersten Mal fragt Windows nach der Firewall: Zugriff in **privaten Netzwerken** erlauben.
@@ -103,6 +115,7 @@ Der Projektpfad muss kurz sein (z. B. `F:\restock-radar`), sonst kann Windows di
 Werkzeuge:
 
 - `tools/probe.py <link>` – zeigt, welche Signale Restock-Radar auf einer Seite findet.
+- `tools/search_probe.py <shop> "<Suchbegriff>" [typ] [sprache]` – zeigt, was ein Suchauftrag in einem Shop findet und welche Treffer warum durchfallen.
 - `tools/fake_shop.py` – Mini-Testshop mit umschaltbarem Lager plus Mini-ntfy, um einen Restock gefahrlos durchzuspielen.
 - `tools/raw.py <link>` – rohe Antwort eines Shops (Status, Weiterleitung, Bot-Schutz).
 

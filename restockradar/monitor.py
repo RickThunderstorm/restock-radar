@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import time
@@ -11,6 +12,8 @@ from .db import Database
 from .detect import AVAILABLE, BLOCKED, BUYABLE, ERROR, PREORDER, QUEUE, SOLDOUT, UNKNOWN, Result, analyze
 from .fetcher import Fetcher
 from .notify import Message, Notifier, is_configured
+from .search import SearchError, alternatives, matches, run_search, shop_query
+from .watches import add_watch
 
 log = logging.getLogger("restockradar")
 
@@ -20,6 +23,8 @@ WARN_AFTER = 5             # so viele Fehlschläge am Stück, dann kommt eine Wa
 COOLDOWN = 5 * 60          # gegen Flackern: dieselbe Seite höchstens alle 5 Minuten melden
 QUEUE_REPEAT = 30 * 60
 PARALLEL = 4
+SEARCH_MIN_INTERVAL = 60    # Suchaufträge höchstens jede Minute
+SHOP_PAUSE = {"throttled": 10 * 60, BLOCKED: 30 * 60, QUEUE: 5 * 60, "error": 5 * 60}
 
 STATUS_WORDS = {
     AVAILABLE: "verfügbar", PREORDER: "vorbestellbar", SOLDOUT: "ausverkauft",
@@ -33,15 +38,20 @@ class Monitor:
         self.fetcher = fetcher
         self.notifier = notifier
         self._running: set[int] = set()
+        self._running_searches: set[int] = set()
         self._tasks: set[asyncio.Task] = set()
         self._sem = asyncio.Semaphore(PARALLEL)
 
     async def run(self) -> None:
         while True:
             try:
-                for watch in self.db.due_watches(time.time()):
+                now = time.time()
+                for watch in self.db.due_watches(now):
                     if watch["id"] not in self._running:
                         self._spawn(self._guarded(watch))
+                for search in self.db.due_searches(now):
+                    if search["id"] not in self._running_searches:
+                        self._spawn(self._guarded_search(search))
                 await self._heartbeat_if_due()
             except Exception:                       # die Schleife darf nie sterben
                 log.exception("Fehler in der Überwachungsschleife")
@@ -149,6 +159,97 @@ class Monitor:
             return old not in BUYABLE
         return False
 
+    # ------------------------------------------------------------------ Suchaufträge
+    async def check_search_now(self, search_id: int) -> dict | None:
+        search = self.db.search(search_id)
+        if search and search["id"] not in self._running_searches:
+            await self._guarded_search(search)
+        return self.db.search(search_id)
+
+    async def _guarded_search(self, search: dict) -> None:
+        self._running_searches.add(search["id"])
+        try:
+            async with self._sem:
+                await self.check_search(search)
+        except Exception:
+            log.exception("Suchauftrag fehlgeschlagen: %s", search["query"])
+            self.db.update_search(search["id"], next_check=time.time() + max(SEARCH_MIN_INTERVAL, search["interval"] or 180))
+        finally:
+            self._running_searches.discard(search["id"])
+
+    async def check_search(self, search: dict) -> None:
+        """Fragt alle aktiven Shops ab. Beim ersten Mal je Shop werden vorhandene Treffer still erfasst."""
+        now = time.time()
+        baseline = set(json.loads(search["baseline"] or "[]"))
+        for shop in self.db.shops():
+            if not shop["enabled"] or (shop["paused_until"] or 0) > now:
+                continue
+            try:
+                items = []
+                for alt in alternatives(search["query"]):
+                    items += await run_search(shop, shop_query(alt, search["ptype"]), self.fetcher)
+            except SearchError as err:
+                kind = "throttled" if "bremst" in err.reason else err.status
+                pause = max(SHOP_PAUSE.get(kind, 300), min(err.retry_after or 0, MAX_BACKOFF))
+                self.db.update_shop(shop["id"], status=kind, reason=err.reason, paused_until=now + pause, last_check=now)
+                continue
+            self.db.update_shop(shop["id"], status="ok", reason="", paused_until=0, last_check=now)
+            silent = shop["id"] not in baseline
+            seen: set[str] = set()
+            for item in items:
+                if item.url not in seen and matches(item, search):
+                    seen.add(item.url)
+                    self._handle_hit(search, shop, item, silent)
+            baseline.add(shop["id"])
+        interval = max(SEARCH_MIN_INTERVAL, search["interval"] or 180)
+        self.db.update_search(search["id"], baseline=json.dumps(sorted(baseline)), last_check=now,
+                              next_check=now + interval * random.uniform(0.9, 1.1))
+
+    def _handle_hit(self, search: dict, shop: dict, item, silent: bool) -> None:
+        now = time.time()
+        label = f"Suche „{search['query']}“"
+        existing = self.db.hit_by_url(search["id"], item.url)
+        if not existing:
+            hit_id = self.db.add_hit(search_id=search["id"], shop_id=shop["id"], url=item.url, title=item.title,
+                                     price=item.price, currency=item.currency, image=item.image, status=item.status,
+                                     is_new=0 if silent else 1, first_seen=now, last_seen=now, last_change=now)
+            if silent:
+                return
+            buyable = item.status in BUYABLE
+            self.db.add_event(None, "restock" if buyable else "info", f"{label}: neu bei {shop['name']} – {item.title}")
+            parts = [None if buyable else STATUS_WORDS.get(item.status), format_price(item.price, item.currency), shop["name"]]
+            self._spawn(self._send(None, Message(
+                ("🆕 Neu & verfügbar: " if buyable else "🆕 Neu gelistet: ") + item.title,
+                " · ".join(p for p in parts if p) + f"\nGefunden über „{search['query']}“",
+                item.url, image=item.image, loud=buyable and search["priority"] == "laut",
+                kind="restock" if buyable else "info")))
+            if search["auto_watch"]:
+                self._spawn(self._auto_watch(hit_id, item.url, search))
+            return
+
+        upd = {"last_seen": now, "title": item.title, "price": item.price, "image": item.image or existing["image"]}
+        old, new = existing["status"], item.status
+        if new != UNKNOWN and new != old:
+            upd.update(status=new, last_change=now)
+            # Wird der Treffer schon als Produkt überwacht, meldet sich die Produkt-Überwachung selbst.
+            if old not in (None, UNKNOWN) and self._worth_alarm(old, new) and not existing["watch_id"]:
+                self.db.add_event(None, "restock", f"{label}: wieder {STATUS_WORDS[new]} – {item.title}")
+                self._spawn(self._send(None, Message(
+                    f"🟢 Wieder verfügbar: {item.title}",
+                    " · ".join(p for p in (format_price(item.price, item.currency), shop["name"]) if p)
+                    + f"\nGefunden über „{search['query']}“",
+                    item.url, image=item.image, loud=search["priority"] == "laut", kind="restock")))
+        self.db.update_hit(existing["id"], **upd)
+
+    async def _auto_watch(self, hit_id: int, url: str, search: dict) -> None:
+        res = await analyze(url, self.fetcher)
+        if res.status == ERROR:
+            self.db.add_event(None, "warning", f"Treffer konnte nicht übernommen werden: {res.reason}")
+            return
+        watch = add_watch(self.db, res, priority=search["priority"],
+                          note=f"Automatisch aus Suche „{search['query']}“ übernommen")
+        self.db.update_hit(hit_id, watch_id=watch["id"])
+
     # ------------------------------------------------------------------ Nachrichten
     @staticmethod
     def _name(watch: dict) -> str:
@@ -200,13 +301,16 @@ class Monitor:
         if settings["last_heartbeat"] == today or now.strftime("%H:%M") < settings["heartbeat_time"]:
             return
         watches = [w for w in self.db.watches() if w["enabled"]]
+        searches = [s for s in self.db.searches() if s["enabled"]]
         channels = settings["channels"]
-        if not watches or not any(c.get("enabled") and is_configured(n, c) for n, c in channels.items()):
+        if not (watches or searches) or not any(c.get("enabled") and is_configured(n, c) for n, c in channels.items()):
             return                                  # noch nichts eingerichtet – dann auch kein Lebenszeichen
         self.db.set_setting("last_heartbeat", today)
         problems = sum(1 for w in watches if w["status"] in (BLOCKED, ERROR, UNKNOWN))
         buyable = [w for w in watches if w["status"] in BUYABLE]
         text = f"{len(watches)} Seiten aktiv"
+        if searches:
+            text += f" · {len(searches)} Suchaufträge"
         text += f" · {problems} mit Problemen" if problems else " · alle lesbar"
         if buyable:
             text += f" · gerade kaufbar: {', '.join(self._name(w) for w in buyable[:3])}"

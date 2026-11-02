@@ -25,6 +25,8 @@ const ICONS = {
   shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>',
   zap: '<path d="M13 2 3 14h9l-1 8 10-12h-9z"/>',
   radar: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="m12 12 6-6"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+  store: '<path d="M3 9l2-5h14l2 5"/><path d="M4 9v11h16V9"/><path d="M3 9h18"/><path d="M9 20v-6h6v6"/>',
 };
 const icon = (name, cls = "i") =>
   `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
@@ -79,7 +81,12 @@ const ui = {
   preview: null, previewLoading: false, prio: "laut", interval: 60, variant: null,
   panelOpen: false, wizardStep: null, wizardChannel: null,
   ntfyOpen: false, tg: null, tgTimer: null, dcEdit: false,
-  keys: { watches: "", events: "" }, offline: false,
+  mode: "link", searchPrio: "laut", searchAuto: false, searchFormBuilt: false, openSearches: new Set(),
+  keys: { watches: "", events: "", searches: "", shops: "" }, offline: false,
+};
+const SHOP_STATUS = {
+  ok: ["Bereit", "ok"], warn: ["Ohne Probetreffer", "warn"], throttled: ["Gebremst", "warn"],
+  blocked: ["Gesperrt", "bad"], error: ["Fehler", "bad"], queue: ["Warteschlange", "warn"],
 };
 
 const nowSec = () => (Date.now() + offset) / 1000;
@@ -125,8 +132,10 @@ function renderAll() {
   renderRunstate();
   renderStats();
   renderHint();
+  renderSearches();
   renderWatches();
   renderEvents();
+  if (ui.mode === "search") renderShopsLine();
 }
 
 function tick() {
@@ -144,13 +153,17 @@ function renderRunstate() {
   }
   if (!S) return;
   const active = S.watches.filter((w) => w.enabled);
-  if (!active.length) {
+  const searches = (S.searches || []).filter((s) => s.enabled);
+  if (!active.length && !searches.length) {
     el.innerHTML = `<span class="dot off"></span>Bereit – noch nichts zu beobachten`;
     return;
   }
-  const next = Math.min(...active.map((w) => w.next_check || 0));
+  const next = Math.min(...[...active, ...searches].map((x) => x.next_check || 0));
   const secs = Math.max(0, Math.round(next - nowSec()));
-  el.innerHTML = `<span class="dot"></span>Läuft · ${active.length} ${active.length === 1 ? "Produkt" : "Produkte"} · nächste Prüfung ${secs <= 1 ? "jetzt" : `in ${secs} s`}`;
+  const parts = [];
+  if (active.length) parts.push(`${active.length} ${active.length === 1 ? "Produkt" : "Produkte"}`);
+  if (searches.length) parts.push(`${searches.length} ${searches.length === 1 ? "Suche" : "Suchen"}`);
+  el.innerHTML = `<span class="dot"></span>Läuft · ${parts.join(" · ")} · nächste Prüfung ${secs <= 1 ? "jetzt" : `in ${secs} s`}`;
 }
 
 function renderStats() {
@@ -300,6 +313,181 @@ async function addWatch(button) {
   } catch (err) {
     toast(err.message, true);
     button.disabled = false;
+  }
+}
+
+/* ================================================================ Suchbegriff statt Link */
+
+function setMode(mode) {
+  ui.mode = mode;
+  document.querySelectorAll("#add-mode [data-mode]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
+  $("#add-form").hidden = mode !== "link";
+  $("#preview").hidden = mode !== "link";
+  $("#search-form").hidden = mode !== "search";
+  if (mode === "search") {
+    if (!ui.searchFormBuilt) renderSearchForm();
+    renderShopsLine();
+    $("#s-query").focus();
+  }
+}
+
+function renderSearchForm() {
+  if (!S) return;
+  ui.searchFormBuilt = true;
+  const meta = S.search_meta;
+  const options = (map, sel) => Object.entries(map).map(([k, v]) => `<option value="${esc(k)}" ${k === sel ? "selected" : ""}>${esc(v)}</option>`).join("");
+  $("#search-form").innerHTML = `
+    <label class="add-label" for="s-query">Wonach soll ich in deinen Shops suchen?</label>
+    <div class="search-grid">
+      <label class="field first"><span>Suchbegriff <span class="hint">– mehrere Schreibweisen mit | trennen</span></span>
+        <input type="text" id="s-query" placeholder="z. B. Prismatische Entwicklungen | Prismatic Evolutions" required></label>
+      <label class="field"><span>Produkttyp</span><select id="s-ptype">${options(meta.types, "display")}</select></label>
+      <label class="field"><span>Sprache</span><select id="s-lang">${options(meta.langs, "de")}</select></label>
+      <label class="field"><span>Höchstpreis in € <span class="hint">– optional</span></span>
+        <input type="text" id="s-max" inputmode="decimal" placeholder="z. B. 250"></label>
+      <label class="field span2"><span>Ohne diese Wörter <span class="hint">– optional, mit Komma getrennt</span></span>
+        <input type="text" id="s-exclude" placeholder="z. B. PSA, gradiert, leer"></label>
+    </div>
+    <div class="search-foot">
+      <div class="segmented" role="group" aria-label="Benachrichtigung">
+        <button type="button" data-sprio="laut" aria-pressed="${ui.searchPrio === "laut"}">${icon("bell")} Laut</button>
+        <button type="button" data-sprio="leise" aria-pressed="${ui.searchPrio === "leise"}">${icon("bellOff")} Leise</button>
+      </div>
+      <label class="inline-switch"><span class="switch"><input type="checkbox" id="s-auto" ${ui.searchAuto ? "checked" : ""}><span></span></span>
+        Neue Treffer automatisch überwachen</label>
+      <span class="shops-line" id="shops-line"></span>
+      <button class="btn primary" type="submit">${icon("search")} Suche anlegen</button>
+    </div>`;
+}
+
+function renderShopsLine() {
+  const el = $("#shops-line");
+  if (!el || !S) return;
+  const active = S.shops.filter((s) => s.enabled);
+  const key = active.map((s) => s.id + s.name).join("|") || "-";
+  if (el.dataset.key === key) return;          // nicht bei jeder Aktualisierung neu zeichnen
+  el.dataset.key = key;
+  el.innerHTML = active.length
+    ? `Durchsucht ${active.length} ${active.length === 1 ? "Shop" : "Shops"}: ${active.slice(0, 4).map((s) => esc(s.name)).join(", ")}${active.length > 4 ? " …" : ""} · <button type="button" class="link-btn" data-open-shops>Shops verwalten</button>`
+    : `<span style="color:var(--warn)">${icon("alert")} Noch keine Shops hinterlegt.</span> <button type="button" class="link-btn" data-open-shops>Shop hinzufügen</button>`;
+}
+
+async function submitSearch(form) {
+  const max = $("#s-max").value.trim().replace(",", ".");
+  const body = {
+    query: $("#s-query").value, ptype: $("#s-ptype").value, lang: $("#s-lang").value,
+    max_price: max ? Number(max) : null, exclude: $("#s-exclude").value,
+    priority: ui.searchPrio, auto_watch: $("#s-auto").checked,
+  };
+  if (max && !(Number(max) > 0)) { toast("Höchstpreis bitte als Zahl, z. B. 250", true); return; }
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  try {
+    await api("/api/searches", { method: "POST", body });
+    toast(`Suche angelegt – ich schaue jetzt in ${S.shops.filter((s) => s.enabled).length} Shops nach`);
+    $("#s-query").value = "";
+    $("#s-max").value = "";
+    $("#s-exclude").value = "";
+    ui.keys.searches = "";
+    await refresh();
+    setTimeout(refresh, 4000);
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderSearches() {
+  const key = JSON.stringify([S.searches.map((s) => [s.id, s.enabled, s.priority, s.auto_watch, s.last_check, s.hit_count,
+    s.hits.map((h) => [h.id, h.status, h.price, h.watch_id])]), [...ui.openSearches]]);
+  if (key === ui.keys.searches) return;
+  ui.keys.searches = key;
+  $("#searches-section").hidden = !S.searches.length;
+  $("#searches").innerHTML = S.searches.map(searchCard).join("");
+}
+
+function searchCard(s) {
+  const meta = S.search_meta;
+  const chips = [
+    s.ptype !== "egal" ? meta.types[s.ptype] : null,
+    s.lang !== "egal" ? meta.langs[s.lang] : null,
+    s.max_price ? `bis ${priceText(s.max_price, "EUR")}` : null,
+    s.exclude ? `ohne ${s.exclude}` : null,
+  ].filter(Boolean).map((c) => `<span class="chip">${esc(c)}</span>`).join("")
+    + (s.auto_watch ? `<span class="chip ok">Auto-Überwachung</span>` : "");
+  const loud = s.priority === "laut";
+  const shopsCount = S.shops.filter((x) => x.enabled).length;
+  const open = ui.openSearches.has(s.id);
+  const shown = open ? s.hits : s.hits.slice(0, 6);
+  const fresh = nowSec() - 2 * 86400;
+  const hits = shown.length ? `<ul class="hits">${shown.map((h) => {
+    const st = STATUS[h.status] || { label: "Status unklar", cls: "muted" };
+    const img = h.image ? `<img src="${esc(safeUrl(h.image))}" alt="" loading="lazy" onerror="this.remove()">` : icon("image");
+    const sub = [h.shop_name, priceText(h.price, h.currency)].filter(Boolean).map(esc).join(" · ");
+    return `<li class="hit" data-hit="${h.id}">
+      <div class="thumb">${img}</div>
+      <div><a class="t" href="${esc(safeUrl(h.url))}" target="_blank" rel="noopener">${esc(h.title)}</a><div class="s">${sub}</div></div>
+      <div class="side">
+        ${h.is_new && h.first_seen > fresh ? `<span class="chip new">Neu</span>` : ""}
+        <span class="badge ${st.cls}">${st.label}</span>
+        ${h.watch_id ? `<span class="chip ok">${icon("check")} Überwacht</span>` : `<button class="btn small" data-act="hit-watch">${icon("radar")} Überwachen</button>`}
+      </div></li>`;
+  }).join("")}</ul>` : `<div class="hits-empty">${s.last_check ? `Noch keine passenden Treffer – ich suche alle ${intervalLabel(s.interval)} weiter.` : `<span class="loading"><span class="spinner"></span>Erster Durchlauf läuft …</span>`}</div>`;
+  const more = s.hits.length > 6 ? `<button class="link-btn small" data-act="more" style="margin-top:8px">${open ? "Weniger anzeigen" : `Alle ${s.hit_count} Treffer anzeigen`}</button>` : "";
+  return `
+    <article class="search-card ${s.enabled ? "" : "is-paused"}" data-sid="${s.id}">
+      <div class="search-head">
+        <div class="grow">
+          <h3>${icon("search")} ${esc(s.query)}</h3>
+          ${chips ? `<div class="chips">${chips}</div>` : ""}
+          <div class="meta">${s.enabled ? `geprüft <span data-rel="${s.last_check || 0}">${rel(s.last_check)}</span> · alle ${intervalLabel(s.interval)}` : "pausiert"} · ${s.hit_count} Treffer · ${shopsCount} ${shopsCount === 1 ? "Shop" : "Shops"}</div>
+        </div>
+        <div class="actions">
+          <button class="icon-btn ${loud ? "on" : ""}" data-act="prio" title="${loud ? "Laut – Alarm bei neuen, kaufbaren Treffern" : "Leise – nur stille Meldung"}" aria-label="Lautstärke umschalten">${icon(loud ? "bell" : "bellOff")}</button>
+          <button class="icon-btn" data-act="check" title="Jetzt suchen" aria-label="Jetzt suchen">${icon("refresh")}</button>
+          <button class="icon-btn" data-act="pause" title="${s.enabled ? "Pausieren" : "Fortsetzen"}" aria-label="${s.enabled ? "Pausieren" : "Fortsetzen"}">${icon(s.enabled ? "pause" : "play")}</button>
+          <button class="icon-btn" data-act="delete" title="Suche löschen" aria-label="Suche löschen">${icon("trash")}</button>
+        </div>
+      </div>
+      ${hits}${more}
+    </article>`;
+}
+
+async function onSearchAction(e) {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const card = btn.closest("[data-sid]");
+  const s = S.searches.find((x) => x.id === Number(card.dataset.sid));
+  if (!s) return;
+  const act = btn.dataset.act;
+  try {
+    if (act === "more") {
+      ui.openSearches.has(s.id) ? ui.openSearches.delete(s.id) : ui.openSearches.add(s.id);
+    } else if (act === "prio") {
+      await api(`/api/searches/${s.id}`, { method: "PATCH", body: { priority: s.priority === "laut" ? "leise" : "laut" } });
+    } else if (act === "pause") {
+      await api(`/api/searches/${s.id}`, { method: "PATCH", body: { enabled: !s.enabled } });
+    } else if (act === "check") {
+      btn.classList.add("spin");
+      const res = await api(`/api/searches/${s.id}/check`, { method: "POST" });
+      toast(`„${res.query}“: ${res.hit_count} Treffer`);
+    } else if (act === "delete") {
+      if (!confirm(`Suche „${s.query}“ löschen?`)) return;
+      await api(`/api/searches/${s.id}`, { method: "DELETE" });
+    } else if (act === "hit-watch") {
+      btn.disabled = true;
+      const hitId = Number(btn.closest("[data-hit]").dataset.hit);
+      const w = await api(`/api/hits/${hitId}/watch`, { method: "POST" });
+      toast(`Wird überwacht: ${w.name || w.shop}`);
+    }
+    ui.keys.searches = "";
+    ui.keys.watches = "";
+    await refresh();
+  } catch (err) {
+    toast(err.message, true);
+    btn.classList.remove("spin");
+    btn.disabled = false;
   }
 }
 
@@ -529,6 +717,18 @@ async function onChannelAction(e) {
       await api("/api/channels/discord", { method: "POST", body: { webhook } });
       ui.dcEdit = false;
       toast("Discord gespeichert");
+    } else if (act === "shop-add") {
+      const url = $("[data-shop-url]", scope).value.trim();
+      if (!url) { toast("Bitte erst den Link zum Shop einfügen", true); return; }
+      btn.innerHTML = `<span class="spinner"></span> Prüfe Shop …`;
+      const res = await api("/api/shops", { method: "POST", body: { url } });
+      const t = res.test;
+      toast(t.count ? `${res.shop.name} hinzugefügt – Probesuche: ${t.count} Treffer` :
+        `${res.shop.name} hinzugefügt, aber ${t.error || "die Probesuche fand nichts"}`, !t.count);
+    } else if (act === "shop-del") {
+      const shop = S.shops.find((s) => s.id === Number(btn.closest("[data-shop]").dataset.shop));
+      if (!shop || !confirm(`${shop.name} entfernen? Seine Treffer werden mit gelöscht.`)) return;
+      await api(`/api/shops/${shop.id}`, { method: "DELETE" });
     }
     await refresh();
     rerenderOverlays();
@@ -536,6 +736,7 @@ async function onChannelAction(e) {
     toast(err.message, true);
   } finally {
     btn.disabled = false;
+    if (act === "shop-add") btn.innerHTML = `${icon("store")} Hinzufügen`;
   }
 }
 
@@ -597,6 +798,9 @@ function renderPanel() {
     <div class="group-title">Benachrichtigungen</div>
     ${channelCard("ntfy")}${channelCard("telegram")}${channelCard("discord")}
 
+    <div class="group-title">Suchaufträge</div>
+    ${shopsCard()}
+
     <div class="group-title">Verhalten</div>
     <div class="card"><div class="card-body" style="margin:0">
       <div class="setting-row">
@@ -632,6 +836,33 @@ function renderPanel() {
   if (set.lan_enabled && !ui.lan) loadLan();
 }
 
+function shopsCard() {
+  const list = S.shops.length ? `<ul class="shop-list">${S.shops.map((s) => {
+    const [label, cls] = SHOP_STATUS[s.status] || ["Unbekannt", ""];
+    const how = { shopify: "Shopify-Suche", woo: "WooCommerce-Suche", html: "Suchseite" }[s.mode] || s.mode;
+    return `<li data-shop="${s.id}">
+      ${icon("store")}
+      <div class="grow"><div class="n"><a href="${esc(safeUrl(s.base))}" target="_blank" rel="noopener">${esc(s.name)}</a></div>
+        <div class="d">${esc(how)}${s.platform && s.mode === "html" ? ` · ${esc(s.platform)}` : ""}${s.reason ? ` · ${esc(s.reason)}` : ""}</div></div>
+      <span class="chip ${cls}" title="${esc(s.reason || "")}">${label}</span>
+      <label class="switch" title="An/Aus"><input type="checkbox" data-shop-toggle="${s.id}" ${s.enabled ? "checked" : ""} aria-label="${esc(s.name)} an oder aus"><span></span></label>
+      <button class="icon-btn" data-act="shop-del" title="Shop entfernen" aria-label="Shop entfernen">${icon("trash")}</button>
+    </li>`;
+  }).join("")}</ul>` : `<div class="muted small">Noch keine Shops. Füge die Kartenshops hinzu, bei denen du kaufen würdest.</div>`;
+  return `
+    <div class="card" id="shops-card">
+      <div class="card-head">
+        <span class="ch-ico" style="background:#0f766e">${icon("store")}</span>
+        <div class="grow"><h3>Shops für Suchaufträge</h3><p>Hier sucht Restock-Radar nach deinen Suchbegriffen. Nimm nur Shops, denen du vertraust – bei Pokémon gibt es viele Fakeshops.</p></div>
+      </div>
+      <div class="card-body">
+        <div class="row"><input type="text" data-shop-url placeholder="https://kartenshop.de" aria-label="Link zum Shop">
+          <button class="btn primary" data-act="shop-add">${icon("store")} Hinzufügen</button></div>
+        ${list}
+      </div>
+    </div>`;
+}
+
 async function loadLan() {
   try { ui.lan = await api("/api/lan"); } catch { ui.lan = { available: false }; }
   if (ui.panelOpen) renderPanel();
@@ -656,6 +887,8 @@ async function onPanelChange(e) {
     } else if ("autostart" in t.dataset) {
       await api("/api/autostart", { method: "POST", body: { enabled: t.checked } });
       toast(t.checked ? "Startet ab jetzt mit Windows" : "Autostart aus");
+    } else if (t.dataset.shopToggle) {
+      await api(`/api/shops/${t.dataset.shopToggle}`, { method: "PATCH", body: { enabled: t.checked } });
     } else {
       return;
     }
@@ -804,8 +1037,22 @@ function wire() {
   });
 
   $("#watches").addEventListener("click", onWatchAction);
+  $("#searches").addEventListener("click", onSearchAction);
+  $("#add-mode").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-mode]");
+    if (b) setMode(b.dataset.mode);
+  });
+  $("#search-form").addEventListener("submit", (e) => { e.preventDefault(); submitSearch(e.target); });
+  $("#search-form").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-sprio]");
+    if (!b) return;
+    ui.searchPrio = b.dataset.sprio;
+    document.querySelectorAll("[data-sprio]").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.sprio === ui.searchPrio)));
+  });
+  $("#search-form").addEventListener("change", (e) => { if (e.target.id === "s-auto") ui.searchAuto = e.target.checked; });
   document.addEventListener("click", (e) => {
     if (e.target.closest("[data-open-settings]")) openPanel();
+    if (e.target.closest("[data-open-shops]")) openPanel("shops-card");
     if (e.target.closest("[data-act-wizard]")) { closePanel(); openWizard(); }
   });
 

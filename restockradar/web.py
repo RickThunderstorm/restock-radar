@@ -15,9 +15,10 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import APP_NAME, VERSION, system
+from . import APP_NAME, VERSION, system, watches
+from . import search as finder
 from .db import Database
-from .detect import AVAILABLE, BUYABLE, SOLDOUT, Result, analyze, normalize_url
+from .detect import Result, analyze, normalize_url
 from .fetcher import Fetcher
 from .monitor import MIN_INTERVAL, Monitor, format_price
 from .notify import Message, Notifier, is_configured, new_ntfy_topic, new_pairing_code, ntfy_links, qr_svg
@@ -72,6 +73,33 @@ class DiscordIn(BaseModel):
 
 class ToggleIn(BaseModel):
     enabled: bool
+
+
+class ShopIn(BaseModel):
+    url: str
+
+
+class SearchIn(BaseModel):
+    query: str
+    ptype: str = "egal"
+    lang: str = "egal"
+    max_price: float | None = None
+    exclude: str = ""
+    priority: str = "laut"
+    auto_watch: bool = False
+    interval: int | None = None
+
+
+class SearchPatch(BaseModel):
+    query: str | None = None
+    ptype: str | None = None
+    lang: str | None = None
+    max_price: float | None = None
+    exclude: str | None = None
+    priority: str | None = None
+    auto_watch: bool | None = None
+    enabled: bool | None = None
+    interval: int | None = None
 
 
 class Controller:
@@ -151,7 +179,97 @@ def create_app(data_dir: Path, controller: Controller | None = None, *, fetcher:
             "channels": _public_channels(settings["channels"]),
             "autostart": {"supported": system.autostart_supported(), "enabled": system.autostart_enabled()},
             "min_interval": MIN_INTERVAL,
+            "shops": db.shops(),
+            "searches": [_search_view(db, s) for s in db.searches()],
+            "search_meta": {"types": {k: v["label"] for k, v in finder.PRODUCT_TYPES.items()},
+                            "langs": finder.LANGUAGES},
         }
+
+    # ------------------------------------------------------------------ Shops & Suchaufträge
+    @app.post("/api/shops")
+    async def add_shop(body: ShopIn):
+        try:
+            info = await finder.detect_shop(body.url, fetcher)
+        except finder.SearchError as err:
+            raise HTTPException(400, err.reason)
+        if db.shop_by_base(info.base):
+            raise HTTPException(400, "Diesen Shop hast du schon hinterlegt.")
+        test = {"count": 0, "sample": [], "error": None}
+        try:
+            items = await finder.run_search({"mode": info.mode, "search_url": info.search_url, "base": info.base},
+                                            "pokemon", fetcher)
+            test.update(count=len(items), sample=[i.title for i in items[:3]])
+        except finder.SearchError as err:
+            if err.status == "blocked" and "bremst" not in err.reason:
+                raise HTTPException(400, f"{err.reason} – diesen Shop kann ich nicht durchsuchen.")
+            test["error"] = err.reason
+        status = "ok" if test["count"] else "warn"
+        reason = test["error"] or ("" if test["count"] else "Probesuche nach „Pokémon“ ohne Treffer")
+        shop_id = db.add_shop(name=info.name, base=info.base, platform=info.platform, mode=info.mode,
+                              search_url=info.search_url, status=status, reason=reason)
+        return {"shop": db.shop(shop_id), "test": test, "notes": info.notes}
+
+    @app.patch("/api/shops/{shop_id}")
+    async def patch_shop(shop_id: int, body: ToggleIn):
+        if not db.shop(shop_id):
+            raise HTTPException(404, "Nicht gefunden")
+        db.update_shop(shop_id, enabled=int(body.enabled), paused_until=0)
+        return db.shop(shop_id)
+
+    @app.delete("/api/shops/{shop_id}")
+    async def delete_shop(shop_id: int):
+        db.delete_shop(shop_id)
+        return {"ok": True}
+
+    @app.post("/api/searches")
+    async def add_search(body: SearchIn):
+        values = _search_values(body.model_dump())
+        if not db.shops():
+            raise HTTPException(400, "Lege zuerst mindestens einen Shop an.")
+        search_id = db.add_search(**values)
+        monitor._spawn(monitor.check_search_now(search_id))      # erster Durchlauf sofort
+        return _search_view(db, db.search(search_id))
+
+    @app.patch("/api/searches/{search_id}")
+    async def patch_search(search_id: int, body: SearchPatch):
+        if not db.search(search_id):
+            raise HTTPException(404, "Nicht gefunden")
+        values = _search_values(body.model_dump(exclude_unset=True), partial=True)
+        if values.keys() & {"query", "ptype", "lang", "max_price", "exclude"}:
+            # Andere Filter = andere Treffer: neu und still erfassen, statt alles als „neu“ zu melden
+            db.clear_hits(search_id)
+            values.update(baseline="[]", next_check=0)
+        if "enabled" in values:
+            values["next_check"] = 0
+        db.update_search(search_id, **values)
+        return _search_view(db, db.search(search_id))
+
+    @app.delete("/api/searches/{search_id}")
+    async def delete_search(search_id: int):
+        db.delete_search(search_id)
+        return {"ok": True}
+
+    @app.post("/api/searches/{search_id}/check")
+    async def check_search(search_id: int):
+        if not await monitor.check_search_now(search_id):
+            raise HTTPException(404, "Nicht gefunden")
+        return _search_view(db, db.search(search_id))
+
+    @app.post("/api/hits/{hit_id}/watch")
+    async def watch_hit(hit_id: int):
+        hit = db.hit(hit_id)
+        if not hit:
+            raise HTTPException(404, "Nicht gefunden")
+        if hit["watch_id"] and db.watch(hit["watch_id"]):
+            return db.watch(hit["watch_id"])
+        result = await analyze(hit["url"], fetcher)
+        if result.status == "error":
+            raise HTTPException(400, result.reason or "Seite nicht lesbar")
+        search_row = db.search(hit["search_id"])
+        watch = watches.add_watch(db, result, priority=search_row["priority"] if search_row else "laut",
+                                  note="Aus Suchtreffer übernommen")
+        db.update_hit(hit_id, watch_id=watch["id"])
+        return watch
 
     # ------------------------------------------------------------------ Produkte
     @app.post("/api/preview")
@@ -170,27 +288,8 @@ def create_app(data_dir: Path, controller: Controller | None = None, *, fetcher:
         url = normalize_url(body.url)
         cached = previews.get(url)
         result = cached[1] if cached and time.time() - cached[0] < PREVIEW_TTL else await analyze(url, fetcher)
-        variant_id, variant_title, price, stock = result.variant_id, result.variant_title, result.price, result.status
-        cart_url = result.cart_url
-        if body.variant_id and result.variants:
-            variant = next((v for v in result.variants if v["id"] == body.variant_id), None)
-            if variant:
-                parts = urlsplit(url)
-                variant_id, variant_title = variant["id"], variant["title"]
-                price = variant["price"] if variant["price"] is not None else price
-                stock = AVAILABLE if variant["available"] else SOLDOUT
-                cart_url = f"{parts.scheme}://{parts.netloc}/cart/{variant['id']}:1"
-        interval = max(MIN_INTERVAL, body.interval or db.settings()["default_interval"])
-        watch_id = db.add_watch(
-            url=url, name=result.name, shop=result.shop, image=result.image, price=price,
-            currency=result.currency, platform=result.platform, method=result.method,
-            variant_id=variant_id, variant_title=variant_title, cart_url=cart_url,
-            status=stock, stock=stock if stock in (*BUYABLE, SOLDOUT) else None,
-            confidence=result.confidence, rating=result.rating, reason=result.reason, note=result.note,
-            priority=body.priority if body.priority in ("laut", "leise") else "laut",
-            interval=interval, last_check=time.time(), next_check=time.time() + interval)
-        db.add_event(watch_id, "info", "Wird jetzt überwacht")
-        return db.watch(watch_id)
+        return watches.add_watch(db, result, priority=body.priority, interval=body.interval,
+                                 variant_id=body.variant_id)
 
     @app.patch("/api/watches/{watch_id}")
     async def patch_watch(watch_id: int, body: WatchPatch):
@@ -333,6 +432,35 @@ def create_app(data_dir: Path, controller: Controller | None = None, *, fetcher:
 
 
 # ---------------------------------------------------------------------- Hilfen
+
+def _search_values(values: dict, partial: bool = False) -> dict:
+    if "query" in values or not partial:
+        query = (values.get("query") or "").strip()
+        if not finder.alternatives(query):
+            raise HTTPException(400, "Bitte einen Suchbegriff eingeben.")
+        values["query"] = query
+    if "ptype" in values and values["ptype"] not in finder.PRODUCT_TYPES:
+        raise HTTPException(400, "Unbekannter Produkttyp")
+    if "lang" in values and values["lang"] not in finder.LANGUAGES:
+        raise HTTPException(400, "Unbekannte Sprache")
+    if "priority" in values and values["priority"] not in ("laut", "leise"):
+        raise HTTPException(400, "Priorität muss „laut“ oder „leise“ sein")
+    if values.get("max_price") is not None and values["max_price"] <= 0:
+        values["max_price"] = None
+    for key in ("auto_watch", "enabled"):
+        if key in values and values[key] is not None:
+            values[key] = int(values[key])
+    if values.get("interval") is not None:
+        values["interval"] = max(60, values["interval"])
+    elif "interval" in values:
+        values.pop("interval")
+    return values
+
+
+def _search_view(db: Database, search: dict) -> dict:
+    hits = db.hits(search["id"])
+    return {**search, "hit_count": len(hits), "hits": hits[:30]}
+
 
 def _public_settings(settings: dict) -> dict:
     return {k: v for k, v in settings.items() if k not in ("channels", "access_key", "last_heartbeat")}

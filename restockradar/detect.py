@@ -609,8 +609,13 @@ def _text_signal(tree: LexborHTMLParser) -> Signal | None:
     root = LexborHTMLParser(root.html or "")
     for junk in root.css("script, style, noscript, header, footer, nav, aside, template"):
         junk.decompose()
-    text = re.sub(r"\s+", " ", (root.body.text(separator=" ") if root.body else "")).lower()
+    status, phrase = text_status(root.body.text(separator=" ") if root.body else "")
+    return Signal("text", status, 1, f"„{phrase}“ gefunden") if status else None
 
+
+def text_status(text: str) -> tuple[str | None, str | None]:
+    """Verfügbarkeit aus freiem Text (Seite oder Trefferkarte). Liefert (Status, gefundene Formulierung)."""
+    text = re.sub(r"\s+", " ", text).lower()
     out_hit = next((p for p in OUT_PHRASES if p in text), None)
     for phrase in OUT_PHRASES:          # „nicht lieferbar“ darf nicht als „lieferbar“ zählen
         text = text.replace(phrase, " ")
@@ -618,12 +623,12 @@ def _text_signal(tree: LexborHTMLParser) -> Signal | None:
     in_hit = next((p for p in IN_TEXT_PHRASES if p in text), None)
 
     if pre_hit and not out_hit:
-        return Signal("text", PREORDER, 1, f"„{pre_hit}“ gefunden")
+        return PREORDER, pre_hit
     if out_hit and not in_hit:
-        return Signal("text", SOLDOUT, 1, f"„{out_hit}“ gefunden")
+        return SOLDOUT, out_hit
     if in_hit and not out_hit:
-        return Signal("text", AVAILABLE, 1, f"„{in_hit}“ gefunden")
-    return None
+        return AVAILABLE, in_hit
+    return None, None
 
 
 # --------------------------------------------------------------------------- Hilfen
