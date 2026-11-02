@@ -6,13 +6,14 @@ import json
 import logging
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
 from .db import Database
 from .detect import AVAILABLE, BLOCKED, BUYABLE, ERROR, PREORDER, QUEUE, SOLDOUT, UNKNOWN, Result, analyze
 from .fetcher import Fetcher, host_key
 from .notify import Message, Notifier, is_configured
+from .reminders import link_shops, releases_on, reminder_message
 from .search import (AUTO_NEW, AUTO_UNAVAILABLE, SearchError, fetch_category, matches, search_categories,
                      search_label, search_shop)
 from .watches import add_watch, fill_from_hit
@@ -56,6 +57,7 @@ class Monitor:
                     if search["id"] not in self._running_searches:
                         self._spawn(self._guarded_search(search))
                 await self._heartbeat_if_due()
+                self._release_reminders_if_due()
             except Exception:                       # die Schleife darf nie sterben
                 log.exception("Fehler in der Überwachungsschleife")
             await asyncio.sleep(1)
@@ -191,8 +193,8 @@ class Monitor:
 
         if (search["query"] or "").strip() or not categories:
             for shop in self.db.shops():
-                if not shop["enabled"] or (shop["paused_until"] or 0) > now:
-                    continue
+                if not shop["enabled"] or shop["mode"] == "link" or (shop["paused_until"] or 0) > now:
+                    continue                        # Link-Shops werden nie abgefragt, nur verlinkt
                 if not await self._take_slot(host_key(shop["base"])):
                     continue                        # Budget voll – dieser Shop ist beim nächsten Durchlauf dran
                 try:
@@ -229,9 +231,14 @@ class Monitor:
     def _handle_items(self, search: dict, shop: dict, items: list, silent: bool) -> None:
         seen: set[str] = set()
         for item in items:
-            if item.url not in seen and matches(item, search):
-                seen.add(item.url)
+            if item.url in seen:
+                continue
+            seen.add(item.url)
+            if matches(item, search):
                 self._handle_hit(search, shop, item, silent)
+            elif (stale := self.db.hit_by_url(search["id"], item.url)) and not stale["watch_id"]:
+                # passt nach besserer Erkennung nicht mehr (z. B. falsche Sprache) – aus der Liste nehmen
+                self.db.delete_hit(stale["id"])
 
     def _handle_hit(self, search: dict, shop: dict, item, silent: bool) -> None:
         now = time.time()
@@ -394,6 +401,25 @@ class Monitor:
 
     def _event(self, watch: dict, kind: str, text: str, old=None, new=None, price=None) -> None:
         self.db.add_event(watch["id"], kind, text, old, new, price)
+
+    # ------------------------------------------------------------------ Erinnerung am Erscheinungstag
+    def _release_reminders_if_due(self, now: datetime | None = None) -> None:
+        settings = self.db.settings()
+        now = now or datetime.now()
+        today = now.date()
+        clock = now.strftime("%H:%M")
+        plans = [("release_reminder", "release_time", "last_release_reminder", today, False),
+                 ("release_eve", "release_eve_time", "last_release_eve", today + timedelta(days=1), True)]
+        for enabled, at, last, day, eve in plans:
+            if not settings[enabled] or settings[last] == today.isoformat() or clock < settings[at]:
+                continue
+            self.db.set_setting(last, today.isoformat())
+            items = releases_on(self.db, day)
+            if not items:
+                continue
+            msg = reminder_message(items, link_shops(self.db), eve=eve)
+            self.db.add_event(None, "info", msg.title.removeprefix("📅 "))
+            self._spawn(self._send(None, msg))
 
     # ------------------------------------------------------------------ Lebenszeichen
     async def _heartbeat_if_due(self) -> None:

@@ -30,7 +30,10 @@ const ICONS = {
   calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/>',
   list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
 };
-const releaseChip = (text) => (text ? `<span class="chip date" title="Erscheinungstermin laut Shop – kann sich verschieben">${icon("calendar")} erscheint ${esc(text)}</span>` : "");
+const localToday = () => new Date(Date.now() + (typeof offset === "number" ? offset : 0)).toLocaleDateString("sv-SE");
+// nur kommende Termine – „erscheint 23.01.2026“ bei längst erschienener Ware wäre irreführend
+const releaseChip = (text, iso) => (text && (!iso || iso >= localToday())
+  ? `<span class="chip date" title="Erscheinungstermin laut Shop – kann sich verschieben">${icon("calendar")} erscheint ${esc(text)}</span>` : "");
 const icon = (name, cls = "i") =>
   `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 
@@ -67,7 +70,9 @@ async function api(path, opts = {}) {
   try { data = await res.json(); } catch { /* leer */ }
   if (!res.ok) {
     const detail = data && data.detail;
-    throw new Error(typeof detail === "string" ? detail : `Fehler ${res.status}`);
+    const err = new Error(typeof detail === "string" ? detail : detail && detail.message ? detail.message : `Fehler ${res.status}`);
+    err.data = detail && typeof detail === "object" ? detail : null;
+    throw err;
   }
   return data;
 }
@@ -87,12 +92,16 @@ const ui = {
   panelOpen: false, wizardStep: null, wizardChannel: null,
   ntfyOpen: false, tg: null, tgTimer: null, dcEdit: false,
   mode: "link", searchPrio: "laut", searchFormBuilt: false, openSearches: new Set(),
-  keys: { watches: "", events: "", searches: "", shops: "" }, offline: false,
+  keys: { watches: "", events: "", searches: "", shops: "", calendar: "" }, offline: false,
+  blockedShop: null,
 };
 const SHOP_STATUS = {
   ok: ["Bereit", "ok"], warn: ["Ohne Probetreffer", "warn"], throttled: ["Gebremst", "warn"],
   blocked: ["Gesperrt", "bad"], error: ["Fehler", "bad"], queue: ["Warteschlange", "warn"],
+  link: ["Nur Link", ""],
 };
+const MONTHS = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
+const WEEKDAYS = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"];
 
 const nowSec = () => (Date.now() + offset) / 1000;
 
@@ -137,6 +146,7 @@ function renderAll() {
   renderRunstate();
   renderStats();
   renderHint();
+  renderCalendar();
   renderSearches();
   renderWatches();
   renderEvents();
@@ -166,10 +176,11 @@ function renderRunstate() {
   }
   const next = Math.min(...[...active, ...searches].map((x) => x.next_check || 0));
   const secs = Math.max(0, Math.round(next - nowSec()));
+  const nextText = secs <= 1 ? "jetzt" : secs < 120 ? `in ${secs} s` : `in ${Math.round(secs / 60)} Min.`;
   const parts = [];
   if (active.length) parts.push(`${active.length} ${active.length === 1 ? "Produkt" : "Produkte"}`);
   if (searches.length) parts.push(`${searches.length} ${searches.length === 1 ? "Suche" : "Suchen"}`);
-  el.innerHTML = `<span class="dot"></span>Läuft · ${parts.join(" · ")} · nächste Prüfung ${secs <= 1 ? "jetzt" : `in ${secs} s`}`;
+  el.innerHTML = `<span class="dot"></span>Läuft · ${parts.join(" · ")} · nächste Prüfung ${secs > 86400 ? "später" : nextText}`;
 }
 
 function renderStats() {
@@ -322,6 +333,33 @@ async function addWatch(button) {
   }
 }
 
+/* ================================================================ Demnächst */
+
+function renderCalendar() {
+  const days = S.calendar || [];
+  const key = JSON.stringify(days);
+  if (key === ui.keys.calendar) return;
+  ui.keys.calendar = key;
+  $("#calendar-section").hidden = !days.length;
+  $("#calendar").innerHTML = days.map((day) => {
+    const d = new Date(`${day.date}T00:00:00`);
+    const week = day.label && day.label.startsWith("KW") ? day.label.split("/")[0] : WEEKDAYS[d.getDay()];
+    const links = day.links.length
+      ? `<div class="cal-links"><span class="lbl">Selbst prüfen:</span>${day.links.map((l) =>
+          `<a class="btn small" href="${esc(safeUrl(l.url))}" target="_blank" rel="noopener">${icon("external")} ${esc(l.label)}</a>`).join("")}</div>`
+      : "";
+    return `
+      <article class="cal-day">
+        <div class="cal-date"><div class="d">${d.getDate()}</div><div class="m">${MONTHS[d.getMonth()]}</div><div class="w">${esc(week)}</div></div>
+        <div>
+          <ul class="cal-items">${day.items.map((i) =>
+            `<li><a href="${esc(safeUrl(i.url))}" target="_blank" rel="noopener">${esc(i.title)}</a> <span class="s">· ${esc(i.shop)}</span></li>`).join("")}</ul>
+          ${links}
+        </div>
+      </article>`;
+  }).join("");
+}
+
 /* ================================================================ Suchbegriff statt Link */
 
 function setMode(mode) {
@@ -449,7 +487,7 @@ function searchCard(s) {
       <div><a class="t" href="${esc(safeUrl(h.url))}" target="_blank" rel="noopener">${esc(h.title)}</a><div class="s">${sub}</div></div>
       <div class="side">
         ${h.is_new && h.first_seen > fresh ? `<span class="chip new">Neu</span>` : ""}
-        ${releaseChip(h.release)}
+        ${releaseChip(h.release, h.release_date)}
         <span class="badge ${st.cls}">${st.label}</span>
         ${h.watched ? `<span class="chip ok">${icon("check")} Überwacht</span>` : `<button class="btn small" data-act="hit-watch">${icon("radar")} Überwachen</button>`}
       </div></li>`;
@@ -543,7 +581,7 @@ function watchCard(w) {
         <a class="name" href="${esc(safeUrl(w.url))}" target="_blank" rel="noopener">${esc(w.name || w.url)}</a>
         <div class="sub">${sub}</div>
         <div class="meta">${w.enabled ? `geprüft <span data-rel="${w.last_check || 0}">${rel(w.last_check)}</span> · alle ${intervalLabel(w.interval)}` : "pausiert"} · ${method}</div>
-        ${w.release || w.auto ? `<div class="chips">${releaseChip(w.release)}${w.auto ? `<span class="chip">${icon("search")} aus Suchauftrag</span>` : ""}</div>` : ""}
+        ${releaseChip(w.release, w.release_date) || w.auto ? `<div class="chips">${releaseChip(w.release, w.release_date)}${w.auto ? `<span class="chip">${icon("search")} aus Suchauftrag</span>` : ""}</div>` : ""}
         ${problem}${note}
       </div>
       <div class="side">
@@ -743,10 +781,27 @@ async function onChannelAction(e) {
       const url = $("[data-shop-url]", scope).value.trim();
       if (!url) { toast("Bitte erst den Link zum Shop einfügen", true); return; }
       btn.innerHTML = `<span class="spinner"></span> Prüfe Shop …`;
-      const res = await api("/api/shops", { method: "POST", body: { url } });
-      const t = res.test;
-      toast(t.count ? `${res.shop.name} hinzugefügt – Probesuche: ${t.count} Treffer` :
-        `${res.shop.name} hinzugefügt, aber ${t.error || "die Probesuche fand nichts"}`, !t.count);
+      ui.blockedShop = null;
+      try {
+        const res = await api("/api/shops", { method: "POST", body: { url } });
+        const t = res.test;
+        toast(t.count ? `${res.shop.name} hinzugefügt – Probesuche: ${t.count} Treffer` :
+          `${res.shop.name} hinzugefügt, aber ${t.error || "die Probesuche fand nichts"}`, !t.count);
+      } catch (err) {
+        if (!(err.data && err.data.blocked)) throw err;
+        ui.blockedShop = { url, message: err.message };     // Angebot: als Link-Shop für Erinnerungen
+      }
+    } else if (act === "shop-add-link") {
+      const example = $("[data-shop-example]", scope).value.trim();
+      const res = await api("/api/shops", { method: "POST", body: { url: ui.blockedShop.url, link_only: true, example } });
+      ui.blockedShop = null;
+      toast(`${res.shop.name} als Link-Shop hinzugefügt – er erscheint in deinen Erinnerungen`);
+    } else if (act === "shop-offer-close") {
+      ui.blockedShop = null;
+    } else if (act === "shop-link") {
+      const shop = S.shops.find((s) => s.id === Number(btn.closest("[data-shop]").dataset.shop));
+      await api(`/api/shops/${shop.id}`, { method: "PATCH", body: { link_only: true } });
+      toast(`${shop.name} wird nicht mehr abgefragt, aber in Erinnerungen verlinkt`);
     } else if (act === "shop-del") {
       const shop = S.shops.find((s) => s.id === Number(btn.closest("[data-shop]").dataset.shop));
       if (!shop || !confirm(`${shop.name} entfernen? Seine Treffer werden mit gelöscht.`)) return;
@@ -831,6 +886,16 @@ function renderPanel() {
         <label class="switch"><input type="checkbox" data-setting="heartbeat_enabled" ${set.heartbeat_enabled ? "checked" : ""} aria-label="Lebenszeichen an oder aus"><span></span></label>
       </div>
       <div class="setting-row">
+        <div class="grow"><b>Erinnerung am Erscheinungstag</b><p>Morgens eine Meldung mit allem, was heute erscheint – mit Direktlinks zu Shops, die ich nicht lesen darf (z. B. Games Island).</p></div>
+        <input type="time" data-setting="release_time" value="${esc(set.release_time)}" aria-label="Uhrzeit der Erinnerung">
+        <label class="switch"><input type="checkbox" data-setting="release_reminder" ${set.release_reminder ? "checked" : ""} aria-label="Erinnerung an oder aus"><span></span></label>
+      </div>
+      <div class="setting-row">
+        <div class="grow"><b>Auch am Vorabend</b><p>Eine leise Meldung am Abend vorher.</p></div>
+        <input type="time" data-setting="release_eve_time" value="${esc(set.release_eve_time)}" aria-label="Uhrzeit am Vorabend">
+        <label class="switch"><input type="checkbox" data-setting="release_eve" ${set.release_eve ? "checked" : ""} aria-label="Vorabend-Erinnerung an oder aus"><span></span></label>
+      </div>
+      <div class="setting-row">
         <div class="grow"><b>Standard-Prüfintervall</b><p>Für neue Produkte. Schneller als 30 Sekunden geht nicht – aus Fairness gegenüber den Shops.</p></div>
         <select data-setting="default_interval" aria-label="Prüfintervall">${INTERVALS.map((s) => `<option value="${s}" ${s === set.default_interval ? "selected" : ""}>${intervalLabel(s)}</option>`).join("")}</select>
       </div>
@@ -893,10 +958,19 @@ function shopsCard() {
       <div class="grow"><div class="n"><a href="${esc(safeUrl(s.base))}" target="_blank" rel="noopener">${esc(s.name)}</a></div>
         <div class="d">${esc(how)}${s.platform && s.mode === "html" ? ` · ${esc(s.platform)}` : ""}${s.reason ? ` · ${esc(s.reason)}` : ""}</div></div>
       <span class="chip ${cls}" title="${esc(s.reason || "")}">${label}</span>
+      ${s.status === "blocked" && s.mode !== "link" ? `<button class="btn small" data-act="shop-link" title="Nicht mehr abfragen, aber in Erinnerungen verlinken">Nur für Erinnerungen</button>` : ""}
       <label class="switch" title="An/Aus"><input type="checkbox" data-shop-toggle="${s.id}" ${s.enabled ? "checked" : ""} aria-label="${esc(s.name)} an oder aus"><span></span></label>
       <button class="icon-btn" data-act="shop-del" title="Shop entfernen" aria-label="Shop entfernen">${icon("trash")}</button>
     </li>`;
   }).join("")}</ul>` : `<div class="muted small">Noch keine Shops. Füge die Kartenshops hinzu, bei denen du kaufen würdest.</div>`;
+  const offer = ui.blockedShop ? `
+    <div class="callout warn blocked-offer">${icon("shield")}<div class="txt">
+      <b>${esc(ui.blockedShop.message)}</b> Als <b>Link-Shop</b> hilft er trotzdem: Am Erscheinungstag bekommst du einen Direktlink zur Suche dort und prüfst selbst im Browser.<br>
+      <span class="muted">Optional für einen genaueren Link: Suche im Shop nach <b>pikachu</b> und füge den Link der Ergebnisseite ein. Ohne Link nehme ich die Google-Suche auf dieser Seite.</span>
+      <div class="row" style="margin-top:8px"><input type="text" data-shop-example placeholder="https://shop.de/search?q=pikachu (optional)" aria-label="Such-Link aus dem Shop">
+        <button class="btn primary" data-act="shop-add-link">Als Link-Shop hinzufügen</button>
+        <button class="btn ghost" data-act="shop-offer-close">Abbrechen</button></div>
+    </div></div>` : "";
   return `
     <div class="card" id="shops-card">
       <div class="card-head">
@@ -904,8 +978,9 @@ function shopsCard() {
         <div class="grow"><h3>Shops für Suchaufträge</h3><p>Hier sucht Restock-Radar nach deinen Suchbegriffen. Nimm nur Shops, denen du vertraust – bei Pokémon gibt es viele Fakeshops.</p></div>
       </div>
       <div class="card-body">
-        <div class="row"><input type="text" data-shop-url placeholder="https://kartenshop.de" aria-label="Link zum Shop">
+        <div class="row"><input type="text" data-shop-url placeholder="https://kartenshop.de" aria-label="Link zum Shop" value="${esc(ui.blockedShop ? ui.blockedShop.url : "")}">
           <button class="btn primary" data-act="shop-add">${icon("store")} Hinzufügen</button></div>
+        ${offer}
         ${list}
       </div>
     </div>`;

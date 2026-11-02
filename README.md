@@ -65,6 +65,14 @@ Widersprechen sich die Signale (manche Shops melden Google dauerhaft „auf Lage
 
 Außerdem erkannt: **Vorbestellung**, **Warteschlangen** (Queue-it – oft das Zeichen, dass ein Drop läuft), **Bot-Schutz** (Cloudflare, Akamai, DataDome …) und **Weiterleitungen auf die Startseite**.
 
+### Erinnerung am Erscheinungstag & gesperrte Shops
+
+Shops mit Bot-Schutz (z. B. Games Island) kann Restock-Radar nicht lesen, und es umgeht den Schutz auch nicht. Damit du dort trotzdem nichts verpasst:
+
+- **Link-Shops:** Ein gesperrter Shop lässt sich als „Link-Shop“ hinterlegen. Beim Hinzufügen bietet Restock-Radar das an, vorhandene gesperrte Shops stellst du mit „Nur für Erinnerungen“ um. Für einen genauen Link suchst du im Shop nach `pikachu` und fügst den Link der Ergebnisseite ein. Ohne Link wird die Google-Suche auf der Shop-Seite verwendet.
+- **Demnächst:** Auf der Startseite stehen kommende Erscheinungstermine aus den lesbaren Shops, mit Knöpfen zur passenden Suche in den Link-Shops.
+- **Erinnerung:** Am Erscheinungstag morgens (Standard 8:00, laut) und auf Wunsch am Vorabend (leise) kommt eine Meldung mit allem, was erscheint, und mit den Direktlinks. Du öffnest sie selbst im Browser.
+
 ### Fair zu den Shops
 
 - **Schonmodus** (Einstellungen → Verhalten): höchstens 4 Anfragen pro Shop und Minute, über alle Produkte, Suchen und automatischen Übernahmen zusammen. Wählbar sind 2, 4, 6, 10 oder unbegrenzt. Ist das Budget voll, verschiebt Restock-Radar Prüfungen, statt sie zu senden. Unter **Last pro Shop** siehst du, welcher Shop dadurch gestreckt wird. Das schützt vor allem davor, dass ein Shop deine Internet-Adresse bremst, denn das würde auch deinen normalen Browser treffen, womöglich genau beim Drop.

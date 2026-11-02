@@ -5,7 +5,7 @@ import asyncio
 import html
 import io
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from urllib.parse import urlsplit
 
@@ -27,6 +27,7 @@ class Message:
     image: str | None = None
     loud: bool = True
     kind: str = "restock"       # restock | queue | info | warning | test
+    links: list[tuple[str, str]] = field(default_factory=list)   # weitere Knöpfe: (Beschriftung, Link)
 
 
 class Notifier:
@@ -70,11 +71,12 @@ class Notifier:
         }
         if msg.url:
             payload["click"] = msg.url
-        actions = [{"action": "view", "label": "Zum Produkt", "url": msg.url}] if msg.url else []
+        actions = [{"action": "view", "label": "Zum Produkt", "url": msg.url}] if msg.url and not msg.links else []
         if msg.cart_url:
             actions.append({"action": "view", "label": "Direkt zur Kasse", "url": msg.cart_url})
+        actions += [{"action": "view", "label": label[:40], "url": url} for label, url in msg.links]
         if actions:
-            payload["actions"] = actions
+            payload["actions"] = actions[:3]                 # ntfy erlaubt höchstens drei Knöpfe
         if msg.image:
             payload["attach"] = msg.image
         resp = await self._client.post(conf.get("server", "https://ntfy.sh").rstrip("/") + "/", json=payload)
@@ -87,6 +89,7 @@ class Notifier:
         buttons = [[{"text": "🛒 Direkt zur Kasse", "url": msg.cart_url}]] if msg.cart_url else []
         if msg.url:
             buttons.append([{"text": "Zum Produkt", "url": msg.url}])
+        buttons += [[{"text": f"🔎 {label}"[:60], "url": url}] for label, url in msg.links[:6]]
         common = {"chat_id": conf["chat_id"], "parse_mode": "HTML", "disable_notification": not msg.loud}
         if buttons:
             common["reply_markup"] = {"inline_keyboard": buttons}
@@ -104,6 +107,7 @@ class Notifier:
         lines = [msg.text]
         if msg.cart_url:
             lines.append(f"[🛒 Direkt zur Kasse]({msg.cart_url})")
+        lines += [f"[🔎 {label}]({url})" for label, url in msg.links[:10]]
         embed = {"title": msg.title[:256], "description": "\n".join(lines)[:4000], "color": color}
         if msg.url:
             embed["url"] = msg.url

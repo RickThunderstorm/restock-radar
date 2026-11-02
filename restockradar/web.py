@@ -7,6 +7,7 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
@@ -16,7 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import APP_NAME, VERSION, system, watches
+from . import APP_NAME, VERSION, reminders, system, watches
 from . import search as finder
 from .db import Database
 from .detect import Result, analyze, normalize_url
@@ -53,6 +54,10 @@ class WatchPatch(BaseModel):
 class SettingsIn(BaseModel):
     heartbeat_enabled: bool | None = None
     heartbeat_time: str | None = None
+    release_reminder: bool | None = None
+    release_time: str | None = None
+    release_eve: bool | None = None
+    release_eve_time: str | None = None
     default_interval: int | None = None
     shop_budget: int | None = None
     setup_done: bool | None = None
@@ -79,6 +84,16 @@ class ToggleIn(BaseModel):
 
 class ShopIn(BaseModel):
     url: str
+    link_only: bool = False         # nur für Erinnerungs-Links, wird nie abgefragt
+    example: str | None = None      # Such-Link aus dem Browser, gesucht nach EXAMPLE_WORD
+
+
+class ShopPatch(BaseModel):
+    enabled: bool | None = None
+    link_only: bool | None = None
+
+
+EXAMPLE_WORD = "pikachu"
 
 
 class SearchIn(BaseModel):
@@ -188,6 +203,7 @@ def create_app(data_dir: Path, controller: Controller | None = None, *, fetcher:
             "shops": db.shops(),
             "searches": [_search_view(db, s) for s in db.searches()],
             "load": _shop_load(db, fetcher, settings),
+            "calendar": reminders.calendar(db, date.today()),
             "search_meta": {"types": {k: v["label"] for k, v in finder.PRODUCT_TYPES.items()},
                             "langs": finder.LANGUAGES, "auto_modes": finder.AUTO_MODES},
         }
@@ -195,9 +211,15 @@ def create_app(data_dir: Path, controller: Controller | None = None, *, fetcher:
     # ------------------------------------------------------------------ Shops & Suchaufträge
     @app.post("/api/shops")
     async def add_shop(body: ShopIn):
+        if body.link_only:
+            return _add_link_shop(db, body)
         try:
             info = await finder.detect_shop(body.url, fetcher)
         except finder.SearchError as err:
+            if err.status == "blocked" and "bremst" not in err.reason:
+                # Nicht durchsuchbar – aber als Link-Shop für Erinnerungen trotzdem nützlich
+                raise HTTPException(409, {"message": f"{err.reason} – diesen Shop kann ich nicht durchsuchen.",
+                                          "blocked": True})
             raise HTTPException(400, err.reason)
         if db.shop_by_base(info.base):
             raise HTTPException(400, "Diesen Shop hast du schon hinterlegt.")
@@ -208,7 +230,8 @@ def create_app(data_dir: Path, controller: Controller | None = None, *, fetcher:
             test.update(count=len(items), sample=[i.title for i in items[:3]])
         except finder.SearchError as err:
             if err.status == "blocked" and "bremst" not in err.reason:
-                raise HTTPException(400, f"{err.reason} – diesen Shop kann ich nicht durchsuchen.")
+                raise HTTPException(409, {"message": f"{err.reason} – diesen Shop kann ich nicht durchsuchen.",
+                                          "blocked": True})
             test["error"] = err.reason
         status = "ok" if test["count"] else "warn"
         reason = test["error"] or ("" if test["count"] else "Probesuche nach „Pokémon“ ohne Treffer")
@@ -217,10 +240,13 @@ def create_app(data_dir: Path, controller: Controller | None = None, *, fetcher:
         return {"shop": db.shop(shop_id), "test": test, "notes": info.notes}
 
     @app.patch("/api/shops/{shop_id}")
-    async def patch_shop(shop_id: int, body: ToggleIn):
+    async def patch_shop(shop_id: int, body: ShopPatch):
         if not db.shop(shop_id):
             raise HTTPException(404, "Nicht gefunden")
-        db.update_shop(shop_id, enabled=int(body.enabled), paused_until=0)
+        if body.enabled is not None:
+            db.update_shop(shop_id, enabled=int(body.enabled), paused_until=0)
+        if body.link_only:
+            db.update_shop(shop_id, mode="link", status="link", reason=LINK_REASON, paused_until=0)
         return db.shop(shop_id)
 
     @app.delete("/api/shops/{shop_id}")
@@ -332,7 +358,7 @@ def create_app(data_dir: Path, controller: Controller | None = None, *, fetcher:
         for key, value in body.model_dump(exclude_none=True).items():
             if key == "default_interval":
                 value = max(MIN_INTERVAL, value)
-            if key == "heartbeat_time" and not _valid_time(value):
+            if key.endswith("_time") and not _valid_time(value):
                 raise HTTPException(400, "Uhrzeit bitte als HH:MM")
             if key == "shop_budget":
                 value = min(30, max(0, value))
@@ -482,6 +508,27 @@ def _search_values(values: dict, partial: bool = False, current: dict | None = N
     return {k: v for k, v in values.items() if v is not None or k == "max_price"}
 
 
+LINK_REASON = "Nur für Erinnerungen – wird nicht abgefragt"
+
+
+def _add_link_shop(db: Database, body: ShopIn) -> dict:
+    parts = urlsplit(normalize_url(body.url))
+    if not re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}", parts.hostname or ""):
+        raise HTTPException(400, "Das sieht nicht nach einem Link aus.")
+    base = f"{parts.scheme}://{parts.netloc}"
+    if db.shop_by_host(parts.hostname or ""):
+        raise HTTPException(400, "Diesen Shop hast du schon hinterlegt.")
+    template = ""
+    if body.example and body.example.strip():
+        template = reminders.template_from_example(normalize_url(body.example), EXAMPLE_WORD) or ""
+        if not template:
+            raise HTTPException(400, f"Im Such-Link kommt „{EXAMPLE_WORD}“ nicht vor. Suche im Shop genau nach "
+                                     f"„{EXAMPLE_WORD}“ und kopiere dann den Link der Ergebnisseite.")
+    shop_id = db.add_shop(name=(parts.hostname or "").removeprefix("www."), base=base, mode="link",
+                          search_url=template, status="link", reason=LINK_REASON)
+    return {"shop": db.shop(shop_id), "test": {"count": 0, "sample": [], "error": None}, "notes": []}
+
+
 def _shop_load(db: Database, fetcher: Fetcher, settings: dict) -> list[dict]:
     """Geplante Anfragen pro Shop und Minute – und ob der Schonmodus sie strecken muss."""
     planned: dict[str, float] = {}
@@ -494,7 +541,7 @@ def _shop_load(db: Database, fetcher: Fetcher, settings: dict) -> list[dict]:
     for watch in db.watches():
         if watch["enabled"]:
             add(watch["url"], 60 / max(MIN_INTERVAL, watch["interval"] or 60))
-    shops = [s for s in db.shops() if s["enabled"]]
+    shops = [s for s in db.shops() if s["enabled"] and s["mode"] != "link"]
     for search in db.searches():
         if not search["enabled"]:
             continue
@@ -527,7 +574,8 @@ def _search_view(db: Database, search: dict) -> dict:
 
 
 def _public_settings(settings: dict) -> dict:
-    return {k: v for k, v in settings.items() if k not in ("channels", "access_key", "last_heartbeat")}
+    hidden = ("channels", "access_key", "last_heartbeat", "last_release_reminder", "last_release_eve")
+    return {k: v for k, v in settings.items() if k not in hidden}
 
 
 def _public_channels(channels: dict) -> dict:

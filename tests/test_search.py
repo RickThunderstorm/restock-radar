@@ -149,6 +149,30 @@ def test_strict_shop_search_retries_without_type_word():
     assert len(items) == 2
 
 
+def test_german_filter_drops_asian_and_other_editions():
+    de = crit(lang="de", query="")
+    # echte Titel von Card-Corner und collect-it, die vorher als „deutsch“ durchgerutscht sind
+    for title in ["Pokemon Nihil Zero (M3) Display", "Pokemon Gem Pack 5 Display (CBB5C)",
+                  "Pokemon Collect 151 First Partners Display Set (Chinesisch)", "Pokemon Inferno X Display (Koreanisch)",
+                  "Pokemon Black Bolt - 1 Display Japan", "Pokemon Chaos Rising - 1 Display (36 Booster) - EN",
+                  "Pokémon Display Édition française (FR)", "Pokémon Cards Gem Pack Vol. 5 Booster CHI - 1 Display"]:
+        assert not search.matches(item(title), de), title
+    assert search.matches(item("Pokemon Weiße Flammen Display (36 Booster)"), de)
+    assert search.matches(item("Pokemon Nihil Zero (M3) Display"), crit(lang="jp", query=""))
+
+
+def test_card_name_ignores_embedded_brand():
+    html = ('<div itemscope itemtype="https://schema.org/Product">'
+            '<div itemprop="brand" itemscope itemtype="https://schema.org/Brand"><meta itemprop="name" content="Pokemon"></div>'
+            '<meta itemprop="name" content="Pokemon Black Bolt - 1 Display Japan">'
+            '<div itemprop="offers" itemscope itemtype="https://schema.org/Offer"><meta itemprop="price" content="150.00">'
+            '<link itemprop="availability" href="https://schema.org/InStock">'
+            '<meta itemprop="url" content="https://collect.test/black-bolt"></div></div>')
+    [card] = search.parse_cards(html, "https://collect.test/search")
+    assert card.title == "Pokemon Black Bolt - 1 Display Japan"
+    assert card.price == 150.0 and card.status == "available" and card.url == "https://collect.test/black-bolt"
+
+
 def test_shop_query_adds_type_word():
     assert search.shop_query("Prismatische Entwicklungen", "display") == "Prismatische Entwicklungen display"
     assert search.shop_query("Prismatische Display", "display") == "Prismatische Display"
@@ -309,6 +333,21 @@ def test_search_baseline_then_new_and_restock(tmp_path):
         await tick(monitor, db, search_id)
         assert len(sent) == 2 and sent[1]["title"].startswith("🟢 Wieder verfügbar")
         assert len(db.hits(search_id)) == 2
+
+    run(scenario())
+
+
+def test_hits_that_no_longer_match_are_removed(tmp_path):
+    db, monitor, shop, sent, shop_id, search_id = setup_monitor(tmp_path)
+    old = db.add_hit(search_id=search_id, shop_id=shop_id, url="https://shop.test/products/asia",
+                     title="Prismatische Entwicklungen Display", status="available", first_seen=1)
+    shop.products.append({"title": "Prismatische Entwicklungen Display (Koreanisch)", "url": "/products/asia",
+                          "price": "60.00", "available": True})
+
+    async def scenario():
+        await tick(monitor, db, search_id)
+        assert db.hit(old) is None                     # inzwischen als koreanisch erkannt → raus
+        assert len(db.hits(search_id)) == 1            # der deutsche Treffer bleibt
 
     run(scenario())
 

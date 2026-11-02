@@ -178,7 +178,13 @@ def test_old_database_gets_new_columns(tmp_path):
                        "CREATE TABLE searches (id INTEGER PRIMARY KEY, query TEXT NOT NULL, created REAL);")
     conn.commit()
     conn.close()
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE shops (id INTEGER PRIMARY KEY, name TEXT, base TEXT NOT NULL UNIQUE)")
+    conn.execute("INSERT INTO shops (name, base) VALUES ('Sammelkarten kaufen bei Card-Corner', 'https://www.card-corner.de')")
+    conn.commit()
+    conn.close()
     db = Database(path)
+    assert db.shops()[0]["name"] == "card-corner.de"
     watch = db.watches()[0]
     assert watch["url"] == "https://alt.test/p" and "release" in watch and watch["auto"] == 0
     search_id = db.add_search(query="x", categories="https://k.test/a")

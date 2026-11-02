@@ -72,10 +72,19 @@ LANGUAGES = {"egal": "Jede Sprache", "de": "Deutsch", "en": "Englisch", "jp": "J
 TRACKING_PARAMS = {"listtype", "searchparam", "delivery_alarm", "_pos", "_psq", "_ss", "_psid", "_sid", "srsltid",
                    "sid", "force_sid", "spartner", "ref", "source"}
 LANG_MARKERS = {
-    "de": ["deutsch", "german", "de", "dt"],
+    "de": ["deutsch", "german", "de", "dt", "ger"],
     "en": ["englisch", "english", "en", "eng"],
-    "jp": ["japanisch", "japanese", "jp", "jap", "jpn"],
+    "jp": ["japanisch", "japanese", "japan", "jp", "jap", "jpn"],
+    "zh": ["chinesisch", "chinese", "china", "chn", "chi", "cn", "zh", "gem pack"],   # Gem Packs gibt es nur auf Chinesisch
+    "ko": ["koreanisch", "korean", "korea", "kor", "kr"],
+    "th": ["thailaendisch", "thai"],
+    "id": ["indonesisch", "indonesian"],
+    "fr": ["franzoesisch", "french", "fr"],
+    "es": ["spanisch", "spanish"],
+    "it": ["italienisch", "italian"],
 }
+# Set-Kürzel asiatischer Ausgaben in Klammern: „(M3)“, „(SV8a)“, „(CBB5C)“ – deutsche Titel haben die nicht
+ASIAN_SET_CODE = re.compile(r"\((?:m\d+[a-z]{0,2}|sv\d+[a-z]{0,2}|s\d+[a-z]{0,2}|cbb\d+[a-z]?|cs\d+[a-z]?|csv\d+[a-z]?)\)", re.I)
 
 
 class SearchError(Exception):
@@ -352,7 +361,7 @@ def _card_item(card: LexborNode, base: str, host: str | None) -> Item | None:
     if urlsplit(url).hostname != host:
         return None
 
-    title = _prop(card, "name")
+    title = _prop(card, "name", own=True)
     if not title:
         # „card-title“, „product-title“ … – aber nicht „title-header“, der oft Zusatzangaben enthält
         node = (card.css_first('[class$="title"], [class*="title "], [class$="-name"], [class*="-name "]')
@@ -397,12 +406,24 @@ def _card_item(card: LexborNode, base: str, host: str | None) -> Item | None:
                 image=image, status=status, release=release, release_date=release_date)
 
 
-def _prop(card: LexborNode, name: str) -> str | None:
-    node = card.css_first(f'[itemprop="{name}"]')
+def _prop(card: LexborNode, name: str, own: bool = False) -> str | None:
+    """schema.org-Eigenschaft einer Karte. `own`: nur die der Karte selbst, nicht die eines eingebetteten
+    Herstellers – sonst heißt bei manchen Shops jedes Produkt einfach „Pokemon“."""
+    nodes = card.css(f'[itemprop="{name}"]')
+    node = next((n for n in nodes if not own or _own_scope(n, card)), None)
     if node is None:
         return None
     value = node.attributes.get("content") or node.attributes.get("href") or node.text(separator=" ", strip=True)
     return value.strip() if value else None
+
+
+def _own_scope(node: LexborNode, card: LexborNode) -> bool:
+    current = node.parent
+    while current is not None and current.mem_id != card.mem_id:
+        if "itemscope" in current.attributes:
+            return False
+        current = current.parent
+    return True
 
 
 def clean_url(url: str) -> str:
@@ -462,7 +483,7 @@ def matches(item: Item, search: dict) -> bool:
         return False
     if ptype["any"] and any(_has(hay, p) for p in ACCESSORIES):
         return False
-    if not _language_ok(hay, search.get("lang") or "egal"):
+    if not _language_ok(hay, search.get("lang") or "egal", asian_code=bool(ASIAN_SET_CODE.search(item.title))):
         return False
     excludes = [w.strip() for w in (search.get("exclude") or "").split(",") if w.strip()]
     if any(_has(hay, w) for w in excludes):
@@ -473,10 +494,11 @@ def matches(item: Item, search: dict) -> bool:
     return True
 
 
-def _language_ok(hay: str, want: str) -> bool:
+def _language_ok(hay: str, want: str, asian_code: bool = False) -> bool:
     if want == "egal":
         return True
     found = {lang for lang, words in LANG_MARKERS.items() if any(f" {w} " in hay for w in words)}
     if want == "de":
-        return "de" in found or not (found & {"en", "jp"})   # deutsche Ware ist oft gar nicht markiert
-    return want in found
+        # deutsche Ware ist oft gar nicht markiert – also: deutsch markiert, oder keine andere Sprache erkennbar
+        return "de" in found or not (found - {"de"} or asian_code)
+    return want in found or (want == "jp" and asian_code and not found)

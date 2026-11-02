@@ -128,6 +128,12 @@ DEFAULT_SETTINGS = {
     "heartbeat_enabled": True,
     "heartbeat_time": "09:00",
     "last_heartbeat": "",
+    "release_reminder": True,       # am Erscheinungstag erinnern
+    "release_time": "08:00",
+    "release_eve": False,           # zusätzlich am Vorabend
+    "release_eve_time": "19:00",
+    "last_release_reminder": "",
+    "last_release_eve": "",
     "lan_enabled": False,
     "access_key": "",
     "channels": {
@@ -156,6 +162,11 @@ class Database:
                 existing = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
                 if column not in existing:
                     self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+            # Shopnamen aus Version 1.1 waren manchmal ganze Seitentitel („Sammelkarten kaufen bei …“)
+            for shop_id, name, base in self._conn.execute("SELECT id, name, base FROM shops").fetchall():
+                if name and ("://" in name or len(name) > 30 or len(name.split()) > 3):
+                    host = (urlsplit(base).hostname or name).removeprefix("www.")
+                    self._conn.execute("UPDATE shops SET name = ? WHERE id = ?", (host, shop_id))
             self._conn.commit()
 
     def _exec(self, sql: str, params=()) -> sqlite3.Cursor:
@@ -257,6 +268,9 @@ class Database:
 
     def due_searches(self, now: float) -> list[dict]:
         return self._rows("SELECT * FROM searches WHERE enabled = 1 AND next_check <= ? ORDER BY next_check", (now,))
+
+    def delete_hit(self, hit_id: int) -> None:
+        self._exec("DELETE FROM hits WHERE id = ?", (hit_id,))
 
     def clear_hits(self, search_id: int) -> None:
         self._exec("DELETE FROM hits WHERE search_id = ?", (search_id,))
