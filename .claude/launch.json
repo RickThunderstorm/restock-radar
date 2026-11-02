@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "restock-radar-test",
+      "runtimeExecutable": "F:\\restock-radar\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["F:\\restock-radar\\run.py", "--headless", "--minimized", "--port", "8899", "--data", "F:\\restock-radar\\.testdata"],
+      "port": 8899
+    }
+  ]
+}

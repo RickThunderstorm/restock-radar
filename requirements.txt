@@ -1,0 +1,8 @@
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+httpx[http2]==0.28.1
+selectolax==1.0.2
+qrcode==8.2
+# nur für das Symbol neben der Uhr (auf dem Raspberry Pi mit --headless nicht nötig)
+pystray==0.19.5
+pillow==13.0.0

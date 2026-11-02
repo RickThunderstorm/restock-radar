@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Restock-Radar</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <div class="brand">
+        <img src="/static/icon.svg" alt="" width="28" height="28">
+        <span>Restock-Radar</span>
+      </div>
+      <div id="runstate" class="runstate" aria-live="polite"></div>
+      <div class="top-actions">
+        <button class="icon-btn" id="btn-phone" title="Aufs Handy holen" aria-label="Aufs Handy holen"></button>
+        <button class="icon-btn" id="btn-settings" title="Einstellungen" aria-label="Einstellungen"></button>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="add-card" aria-label="Produkt hinzufügen">
+      <form id="add-form" autocomplete="off">
+        <label for="add-url" class="add-label">Welches Produkt soll ich im Auge behalten?</label>
+        <div class="add-row">
+          <input id="add-url" type="url" inputmode="url" placeholder="Produktlink einfügen, z. B. https://shop.de/products/pokemon-display" required>
+          <button class="btn primary" type="submit" id="add-submit">Prüfen</button>
+        </div>
+      </form>
+      <div id="preview"></div>
+    </section>
+
+    <section id="channel-hint"></section>
+    <section class="stats" id="stats" aria-label="Übersicht"></section>
+
+    <section aria-labelledby="list-title">
+      <div class="section-head">
+        <h2 id="list-title">Beobachtete Produkte</h2>
+      </div>
+      <div id="watches" class="watches"></div>
+    </section>
+
+    <section aria-labelledby="events-title" class="events-section">
+      <div class="section-head">
+        <h2 id="events-title">Verlauf</h2>
+      </div>
+      <ol id="events" class="events"></ol>
+    </section>
+  </main>
+
+  <div id="panel-backdrop" class="backdrop" hidden></div>
+  <aside id="panel" class="panel" hidden aria-modal="true" role="dialog" aria-labelledby="panel-title">
+    <div class="panel-head">
+      <h2 id="panel-title">Einstellungen</h2>
+      <button class="icon-btn" data-close aria-label="Schließen"></button>
+    </div>
+    <div id="panel-body" class="panel-body"></div>
+  </aside>
+
+  <div id="wizard" class="wizard" hidden role="dialog" aria-modal="true" aria-labelledby="wizard-title">
+    <div class="wizard-card" id="wizard-card"></div>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
