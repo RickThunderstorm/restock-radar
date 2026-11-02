@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>Restock-Radar – Einrichtung in 10 Minuten</title>
+<style>
+  @page {
+    size: A4;
+    margin: 16mm 16mm 18mm;
+    @bottom-center { content: "Restock-Radar · Seite " counter(page) " von " counter(pages); font: 8pt "Segoe UI", sans-serif; color: #8b93a1; }
+  }
+  :root {
+    --ink: #111827; --muted: #4b5563; --faint: #8b93a1; --line: #e5e7eb;
+    --green: #10b981; --green-dark: #047857; --green-soft: #ecfdf5;
+    --amber: #b45309; --amber-soft: #fff7ed; --blue: #2563eb; --blue-soft: #eff6ff;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body { margin: 0; font: 10.5pt/1.5 "Segoe UI", system-ui, sans-serif; color: var(--ink); }
+  h1, h2, h3 { margin: 0; line-height: 1.2; }
+  p { margin: 0 0 6pt; }
+  b { font-weight: 650; }
+  code { font: 9pt Consolas, monospace; background: #f3f4f6; padding: 1pt 4pt; border-radius: 3pt; }
+  .key { display: inline-block; font-weight: 650; padding: 0 5pt; border: 1px solid #d1d5db; border-bottom-width: 2px; border-radius: 4pt; background: #fafafa; white-space: nowrap; }
+
+  /* Kopf */
+  .hero { display: flex; gap: 14pt; align-items: center; padding: 14pt 16pt; border-radius: 12pt; background: #0f172a; color: #fff; }
+  .hero svg { width: 54pt; height: 54pt; flex: none; }
+  .hero h1 { font-size: 24pt; font-weight: 750; letter-spacing: -.01em; }
+  .hero p { margin: 3pt 0 0; color: #a7f3d0; font-size: 11pt; }
+  .intro { display: grid; grid-template-columns: 1.35fr 1fr; gap: 14pt; margin: 14pt 0 12pt; }
+  .intro p { font-size: 11pt; }
+  .needs { border: 1px solid var(--line); border-radius: 10pt; padding: 10pt 12pt; background: #f9fafb; }
+  .needs h3 { font-size: 10pt; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); margin-bottom: 5pt; }
+  .needs ul { list-style: none; margin: 0; padding: 0; }
+  .needs li { padding-left: 15pt; position: relative; margin: 2pt 0; }
+  .needs li::before { content: "✓"; position: absolute; left: 0; color: var(--green); font-weight: 800; }
+
+  /* Ablauf */
+  .flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8pt; margin-bottom: 16pt; }
+  .flow div { border: 1px solid var(--line); border-radius: 9pt; padding: 7pt 9pt; font-size: 9.5pt; color: var(--muted); }
+  .flow b { display: block; color: var(--ink); font-size: 10pt; }
+  .flow span { display: inline-grid; place-items: center; width: 16pt; height: 16pt; border-radius: 50%; background: var(--green); color: #fff; font-weight: 800; font-size: 9pt; margin-bottom: 3pt; }
+
+  /* Schritte */
+  .step { margin: 0 0 14pt; break-inside: avoid; }
+  .step-head { display: flex; align-items: center; gap: 9pt; margin-bottom: 7pt; padding-bottom: 5pt; border-bottom: 2px solid var(--green); }
+  .num { display: grid; place-items: center; width: 22pt; height: 22pt; border-radius: 50%; background: var(--green); color: #fff; font-weight: 800; font-size: 12pt; flex: none; }
+  .step-head h2 { font-size: 15pt; font-weight: 700; }
+  .step-head .time { margin-left: auto; color: var(--faint); font-size: 9pt; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14pt; align-items: start; }
+  ol, ul { margin: 0 0 6pt; padding-left: 15pt; }
+  li { margin: 2.5pt 0; }
+  figure { margin: 0; break-inside: avoid; }
+  figure img { display: block; width: 100%; border-radius: 8pt; border: 1px solid #1f2937; box-shadow: 0 2pt 8pt rgba(0,0,0,.18); }
+  figcaption { font-size: 8.5pt; color: var(--faint); margin-top: 4pt; text-align: center; }
+  .narrow { width: 82%; margin: 0 auto; }
+  .wide { margin: 8pt 0 6pt; }
+  .note { display: flex; gap: 8pt; padding: 8pt 10pt; border-radius: 8pt; font-size: 9.5pt; margin: 6pt 0; break-inside: avoid; }
+  .note .ico { font-weight: 800; flex: none; }
+  .note.info { background: var(--blue-soft); color: #1e3a8a; }
+  .note.warn { background: var(--amber-soft); color: #7c2d12; }
+  .note.ok { background: var(--green-soft); color: #065f46; }
+
+  /* Windows-Warnung nachgebaut */
+  .smartscreen { background: #0b5cad; color: #fff; border-radius: 6pt; padding: 10pt 12pt; font-size: 9pt; }
+  .smartscreen h4 { margin: 0 0 4pt; font-size: 12pt; font-weight: 600; }
+  .smartscreen p { margin: 0 0 6pt; color: #dbeafe; }
+  .smartscreen .link { text-decoration: underline; color: #fff; font-weight: 600; }
+  .smartscreen .btns { display: flex; justify-content: flex-end; gap: 6pt; }
+  .smartscreen .btns span { border: 1px solid #fff; padding: 2pt 10pt; }
+  .smartscreen .btns .hi { background: #fff; color: #0b5cad; font-weight: 700; }
+
+  /* Hilfe */
+  table { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
+  th { text-align: left; background: #f3f4f6; padding: 5pt 7pt; font-weight: 650; }
+  td { border-top: 1px solid var(--line); padding: 5pt 7pt; vertical-align: top; }
+  td:first-child { font-weight: 600; width: 34%; }
+  tr { break-inside: avoid; }
+  .page-break { break-before: page; }
+  .foot { margin-top: 12pt; font-size: 8.5pt; color: var(--faint); text-align: center; }
+</style>
+</head>
+<body>
+
+<section class="hero">
+  <svg viewBox="0 0 64 64" aria-hidden="true">
+    <rect width="64" height="64" rx="16" fill="#111827"/>
+    <circle cx="32" cy="32" r="21" fill="none" stroke="#34d399" stroke-opacity=".35" stroke-width="3"/>
+    <circle cx="32" cy="32" r="12" fill="none" stroke="#34d399" stroke-opacity=".6" stroke-width="3"/>
+    <path d="M32 32 L49 17" stroke="#34d399" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="32" cy="32" r="4" fill="#34d399"/>
+    <circle cx="43" cy="40" r="4.5" fill="#fbbf24"/>
+  </svg>
+  <div>
+    <h1>Restock-Radar</h1>
+    <p>Einrichtung in 10 Minuten – für deinen Windows-PC und dein Handy</p>
+  </div>
+</section>
+
+<section class="intro">
+  <div>
+    <p>Restock-Radar schaut <b>jede Minute</b> auf die Produktseiten, die du ihm gibst. Sobald ein Artikel wieder lieferbar ist, <b>klingelt dein Handy</b> – mit Bild, Preis und einem Knopf <b>„Direkt zur Kasse“</b>.</p>
+    <p>Installiert wird nichts: Es ist eine einzige Datei, die unten rechts neben der Uhr im Hintergrund läuft.</p>
+  </div>
+  <div class="needs">
+    <h3>Du brauchst</h3>
+    <ul>
+      <li>Windows-PC (Windows 10 oder 11)</li>
+      <li>dein Handy (Android oder iPhone)</li>
+      <li>die Datei <b>RestockRadar.exe</b></li>
+      <li>etwa 10 Minuten</li>
+    </ul>
+  </div>
+</section>
+
+<section class="flow">
+  <div><span>1</span><b>Starten</b>Datei ablegen, doppelklicken</div>
+  <div><span>2</span><b>Handy verbinden</b>ntfy-App, QR-Code scannen</div>
+  <div><span>3</span><b>Produkte hinzufügen</b>Link einfügen, überwachen</div>
+  <div><span>4</span><b>Laufen lassen</b>Autostart an, PC wach halten</div>
+</section>
+
+<!-- Schritt 1 -->
+<section class="step">
+  <div class="step-head"><span class="num">1</span><h2>Datei ablegen und starten</h2><span class="time">ca. 1 Minute</span></div>
+  <div class="cols">
+    <div>
+      <ol>
+        <li>Ordner anlegen, z. B. <b>Dokumente\RestockRadar</b>, und <b>RestockRadar.exe</b> dort speichern. Dort liegen lassen – verschoben startet sie nicht mehr automatisch mit Windows.</li>
+        <li>Doppelklick auf die Datei.</li>
+        <li>Beim ersten Start erscheint die blaue Windows-Warnung (rechts). Klick auf <span class="key">Weitere Informationen</span> und dann <span class="key">Trotzdem ausführen</span>. Das ist nur einmal nötig.</li>
+        <li>Nach ein paar Sekunden öffnet sich dein Browser mit dem Einrichtungs-Assistenten.</li>
+      </ol>
+      <div class="note info"><span class="ico">i</span><span>Warnt der Browser schon beim Herunterladen, die Datei werde selten geladen: auf <b>Behalten</b> klicken.</span></div>
+    </div>
+    <figure>
+      <div class="smartscreen">
+        <h4>Der Computer wurde durch Windows geschützt</h4>
+        <p>Von Microsoft Defender SmartScreen wurde der Start einer unbekannten App verhindert. …</p>
+        <p><span class="link">Weitere Informationen</span> &nbsp;← zuerst hier klicken</p>
+        <div class="btns"><span class="hi">Trotzdem ausführen</span><span>Nicht ausführen</span></div>
+      </div>
+      <figcaption>So ähnlich sieht die Warnung aus. Sie kommt bei Programmen ohne gekauftes Entwickler-Zertifikat.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- Schritt 2 -->
+<section class="step page-break">
+  <div class="step-head"><span class="num">2</span><h2>Benachrichtigung aufs Handy</h2><span class="time">ca. 4 Minuten</span></div>
+  <div class="cols">
+    <div>
+      <p>Der Assistent fragt, wohin die Meldungen sollen. Nimm <b>ntfy-App</b> – das ist am einfachsten und klingelt am lautesten.</p>
+      <ol>
+        <li>Auf dem Handy die kostenlose App <b>ntfy</b> installieren (Play Store oder App Store).</li>
+        <li><b>Android:</b> den QR-Code auf deinem PC-Bildschirm mit der Handy-Kamera scannen.<br>
+            <b>iPhone:</b> in der ntfy-App auf <span class="key">+</span> tippen und den Namen eintragen, der neben „Thema“ steht (beginnt mit <code>restock-</code>).</li>
+        <li>Am PC auf <span class="key">Test senden</span> klicken – das Handy sollte sofort klingeln.</li>
+        <li>In der ntfy-App für diesen Kanal <b>dringende Benachrichtigungen</b> erlauben. Dann klingelt es auch bei „Nicht stören“.</li>
+      </ol>
+      <div class="note warn"><span class="ico">!</span><span>Scanne den QR-Code auf <b>deinem</b> Bildschirm, nicht aus dieser Anleitung – jeder bekommt einen eigenen.</span></div>
+      <figure class="narrow" style="margin-top:8pt">
+        <img src="img/1-kanal-waehlen.png" alt="">
+        <figcaption>Auswahl im Assistenten: ntfy ist empfohlen.</figcaption>
+      </figure>
+    </div>
+    <figure>
+      <img src="img/2-ntfy-einrichten.png" alt="">
+      <figcaption>Hier erscheint dein QR-Code. Darunter: „Test senden“.</figcaption>
+    </figure>
+  </div>
+  <p style="margin-top:8pt; color: var(--muted); font-size: 9.5pt">Lieber Telegram oder Discord? Einfach im Assistenten auswählen – die Schritte stehen dort direkt dabei.</p>
+</section>
+
+<!-- Schritt 3 -->
+<section class="step">
+  <div class="step-head"><span class="num">3</span><h2>Produkte hinzufügen</h2><span class="time">ca. 1 Minute pro Produkt</span></div>
+  <ol>
+    <li>Im Shop die Produktseite öffnen und den Link aus der Adresszeile kopieren.</li>
+    <li>In Restock-Radar oben einfügen – die Prüfung startet von selbst.</li>
+    <li>Restock-Radar zeigt Bild, Name, Preis, aktuellen Stand und wie gut sich die Seite überwachen lässt. <b>„sehr gut“</b> oder <b>„gut“</b> ist ideal.</li>
+    <li><b>Laut</b> lassen für Alarm, dann auf <span class="key">Überwachen</span> klicken.</li>
+  </ol>
+  <figure class="wide">
+    <img src="img/3-produkt-pruefen.png" alt="">
+    <figcaption>Vorschau nach dem Einfügen: Status, Überwachungsqualität, laut/leise, Prüfintervall.</figcaption>
+  </figure>
+  <figure class="wide">
+    <img src="img/4-produkt-liste.png" alt="">
+    <figcaption>Danach steht das Produkt in der Liste und wird jede Minute geprüft.</figcaption>
+  </figure>
+  <p>Mehrere Produkte und Shops sind kein Problem – einfach weitere Links einfügen.</p>
+</section>
+
+<!-- Schritt 4 -->
+<section class="step">
+  <div class="step-head"><span class="num">4</span><h2>Dauerhaft laufen lassen</h2><span class="time">ca. 2 Minuten</span></div>
+  <div class="cols">
+    <div>
+      <p>Restock-Radar prüft nur, solange dein PC an ist:</p>
+      <ol>
+        <li><b>Mit Windows starten</b> einschalten – fragt der Assistent am Ende. Später: Regler-Symbol oben rechts in Restock-Radar.</li>
+        <li><b>Energiesparmodus aus:</b> Windows-Einstellungen → <b>System</b> → <b>Energie &amp; Akku</b> → <b>Bildschirm und Energiesparmodus</b> → „Energiesparmodus nach …“ im Netzbetrieb auf <b>Nie</b>. Der Bildschirm darf ausgehen.</li>
+      </ol>
+      <p>Das Programm sitzt dann unten rechts neben der Uhr (Radar-Symbol, evtl. hinter dem kleinen Pfeil). <b>Klick</b> öffnet die Oberfläche, <b>Rechtsklick → Beenden</b> schließt es. Das Browser-Fenster kannst du jederzeit zumachen.</p>
+    </div>
+    <figure>
+      <img src="img/5-autostart.png" alt="">
+      <figcaption>Letzter Schritt im Assistenten: „Mit Windows starten“ einschalten.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- Alltag -->
+<section class="step">
+  <div class="step-head"><span class="num">✓</span><h2>Im Alltag</h2></div>
+  <p>Wenn ein Produkt wieder da ist, klingelt dein Handy. Tipp auf <b>Direkt zur Kasse</b> – bei Shopify-Shops liegt der Artikel dann schon im Warenkorb, du musst nur noch bezahlen.</p>
+  <figure class="wide">
+    <img src="img/6-verfuegbar.png" alt="">
+    <figcaption>Grüner Rahmen = gerade kaufbar. Der Knopf führt direkt zur Kasse.</figcaption>
+  </figure>
+  <ul>
+    <li><b>Schneller sein:</b> im Shop eingeloggt bleiben, Adresse und Zahlungsart gespeichert haben.</li>
+    <li><b>Glocke</b> am Produkt: laut (Alarm) oder leise (stille Meldung). Daneben: Jetzt prüfen, Pause, Entfernen.</li>
+    <li><b>Lebenszeichen:</b> Jeden Morgen um 9 Uhr kommt eine stille Nachricht „Restock-Radar läuft“. Kommt sie nicht, ist der PC aus oder schläft.</li>
+    <li><b>Verlauf</b> unten in Restock-Radar: alle Funde, gesendeten Nachrichten und Probleme.</li>
+  </ul>
+</section>
+
+<!-- Hilfe -->
+<section class="step">
+  <div class="step-head"><span class="num">?</span><h2>Wenn etwas hakt</h2></div>
+  <table>
+    <tr><th>Problem</th><th>Was tun</th></tr>
+    <tr><td>Windows Defender meldet die Datei</td><td>Bei so gepackten Programmen kommt ab und zu ein Fehlalarm. In der Defender-Meldung zulassen – oder schick mir einen Screenshot.</td></tr>
+    <tr><td>Test-Nachricht kommt nicht an</td><td>In der ntfy-App prüfen, ob der Kanal abonniert ist, und in den Handy-Einstellungen Benachrichtigungen für ntfy erlauben. Dann nochmal <b>Test senden</b>.</td></tr>
+    <tr><td>Produkt zeigt „Gesperrt“</td><td>Der Shop blockt automatische Abrufe (z. B. Amazon, Kaufland, eBay). Daran lässt sich nichts ändern – lieber kleinere Kartenshops beobachten.</td></tr>
+    <tr><td>Produkt zeigt „Gebremst“</td><td>Der Shop hat kurz zu viele Anfragen bekommen. Restock-Radar wartet von selbst länger – nichts tun.</td></tr>
+    <tr><td>Kein Lebenszeichen am Morgen</td><td>Der PC war aus oder im Energiesparmodus – siehe Schritt 4.</td></tr>
+    <tr><td>Produkte vom Handy aus hinzufügen</td><td>Regler-Symbol → <b>Handy-Zugriff im WLAN</b> einschalten, QR-Code scannen. Fragt Windows nach der Firewall: Zugriff in <b>privaten Netzwerken</b> erlauben.</td></tr>
+    <tr><td>Neue Version bekommen</td><td>Rechtsklick aufs Radar-Symbol → <b>Beenden</b>, alte Datei durch die neue ersetzen (gleicher Ordner), neu starten. Produkte und Einstellungen bleiben erhalten.</td></tr>
+  </table>
+  <p class="foot">Restock-Radar · Stand November 2026</p>
+</section>
+
+</body>
+</html>

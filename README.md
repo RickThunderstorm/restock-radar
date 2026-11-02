@@ -2,6 +2,13 @@
 
 Behält ausverkaufte Produkte im Auge und schlägt auf dem Handy Alarm, sobald sie wieder da sind – mit Bild, Preis und „Direkt zur Kasse“-Knopf.
 
+## Download
+
+Unter **[Releases](../../releases/latest)** liegen:
+
+- `RestockRadar.exe` – das Programm für Windows 10/11, ohne Installation
+- `Anleitung-Restock-Radar.pdf` – Einrichtung in 10 Minuten mit Screenshots ([Quelle](docs/anleitung/anleitung.html))
+
 ## Für den Alltag (Windows)
 
 1. `RestockRadar.exe` irgendwohin legen (z. B. `Dokumente\RestockRadar`) und doppelklicken.
@@ -88,6 +95,7 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python -m pytest            # Tests
 .\.venv\Scripts\python run.py               # starten (mit Symbol neben der Uhr)
 .\build.ps1                                  # baut dist\RestockRadar.exe
+.\docs\anleitung\build-pdf.ps1               # druckt die Anleitung mit Edge zu dist\Anleitung-Restock-Radar.pdf
 ```
 
 Der Projektpfad muss kurz sein (z. B. `F:\restock-radar`), sonst kann Windows die Bibliotheken nicht laden.
