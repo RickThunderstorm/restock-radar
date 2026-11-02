@@ -153,6 +153,22 @@ def test_telegram_and_discord_payloads():
     assert dc["content"] == "" and dc["embeds"][0]["url"] == "https://s.test/p"
 
 
+def test_no_heartbeat_on_setup_day_then_daily(tmp_path):
+    db, monitor, shop, sent, watch_id = setup(tmp_path)
+    db.set_setting("heartbeat_time", "00:00")
+
+    async def scenario():
+        await monitor._heartbeat_if_due()
+        await asyncio.gather(*list(monitor._tasks))
+        assert sent == []                                   # Einrichtungstag: still
+        db.set_setting("last_heartbeat", "2000-01-01")      # ein Tag später
+        await monitor._heartbeat_if_due()
+        await asyncio.gather(*list(monitor._tasks))
+        assert len(sent) == 1 and sent[0][1]["priority"] == 3
+
+    asyncio.run(scenario())
+
+
 def test_format_price():
     assert format_price(1499.9, "EUR") == "1.499,90 €"
     assert format_price(None, "EUR") is None

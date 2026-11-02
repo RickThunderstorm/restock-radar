@@ -138,10 +138,12 @@ def test_shopify_variant_and_cart_link():
 
 def test_shopify_fast_path_only_fetches_json():
     url = "https://tcg.test/products/display"
-    product = {"title": "Display", "available": True, "variants": [{"id": 1, "available": True, "price": 100}]}
+    product = {"title": "Display", "available": True,
+               "variants": [{"id": 1, "title": "Default Title", "available": True, "price": 100}]}
     res = run(detect.analyze(url, fetcher_for({"https://tcg.test/products/display.js": product}), method="shopify"))
     assert res.status == detect.AVAILABLE
     assert res.cart_url == "https://tcg.test/cart/1:1"
+    assert res.variant_title is None                    # „Default Title“ wird nicht angezeigt
 
 
 def test_shopify_keeps_locale_prefix():

@@ -285,7 +285,7 @@ async def _apply_shopify(res: Result, url: str, fetcher: Fetcher, variant_id: st
     data = json.loads(page.text)
     variants = [{
         "id": str(v.get("id")),
-        "title": v.get("public_title") or v.get("title") or "Standard",
+        "title": _variant_name(v.get("public_title") or v.get("title")),
         "available": bool(v.get("available")),
         "price": _cents(v.get("price")),
     } for v in data.get("variants", [])]
@@ -309,10 +309,16 @@ async def _apply_shopify(res: Result, url: str, fetcher: Fetcher, variant_id: st
     if buy_variant:
         # Offizieller Shopify-Warenkorb-Link: legt den Artikel direkt in den Korb und öffnet die Kasse.
         res.cart_url = f"{origin}/cart/{buy_variant['id']}:1"
-    detail = f"Variante „{chosen['title']}“" if chosen and len(variants) > 1 else "Produkt"
+    detail = f"Variante „{chosen['title'] or 'Standard'}“" if chosen and len(variants) > 1 else "Produkt"
     status = AVAILABLE if available else SOLDOUT
     res.signals.insert(0, Signal("shopify", status, 4, f"{detail}: {'verfügbar' if available else 'ausverkauft'}"))
     return True
+
+
+def _variant_name(title) -> str | None:
+    """Shopify nennt die einzige Variante eines Produkts „Default Title“ – die zeigen wir nicht an."""
+    title = (title or "").strip()
+    return None if not title or title.lower() == "default title" else title
 
 
 def _cents(value) -> float | None:
@@ -365,7 +371,7 @@ def _shopify_form(res: Result, tree: LexborHTMLParser, base: str, variant_id: st
                 continue
             text = re.sub(r"\s+", " ", option.text(strip=True))
             soldout = "disabled" in option.attributes or any(p in text.lower() for p in OUT_PHRASES)
-            variants.append({"id": vid, "title": re.split(r"\s[-–]\s", text)[0] or "Variante",
+            variants.append({"id": vid, "title": _variant_name(re.split(r"\s[-–]\s", text)[0]) or "Variante",
                              "available": not soldout, "price": None})
             if chosen is None and "selected" in option.attributes:
                 chosen = vid

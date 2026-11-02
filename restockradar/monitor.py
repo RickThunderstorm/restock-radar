@@ -194,6 +194,9 @@ class Monitor:
             return
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")
+        if not settings["last_heartbeat"]:
+            self.db.set_setting("last_heartbeat", today)    # am Einrichtungstag noch kein Lebenszeichen
+            return
         if settings["last_heartbeat"] == today or now.strftime("%H:%M") < settings["heartbeat_time"]:
             return
         watches = [w for w in self.db.watches() if w["enabled"]]
