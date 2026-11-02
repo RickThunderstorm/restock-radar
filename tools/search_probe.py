@@ -21,15 +21,12 @@ async def main(shop_url: str, query: str, ptype: str = "egal", lang: str = "egal
     for note in info.notes:
         print("Hinweis:", note)
     criteria = {"query": query, "ptype": ptype, "lang": lang, "max_price": None, "exclude": ""}
-    shop = asdict(info)
-    for alt in search.alternatives(query):
-        q = search.shop_query(alt, ptype)
-        items = await search.run_search(shop, q, fetcher)
-        print(f"\n„{q}“: {len(items)} Ergebnisse vom Shop")
-        for item in items:
-            mark = "✓" if search.matches(item, criteria) else "✗"
-            price = f"{item.price:.2f} €" if item.price is not None else "–"
-            print(f"  {mark} {item.status:<9} {price:>10}  {item.title[:80]}")
+    items = await search.search_shop(asdict(info), criteria, fetcher)
+    print(f"\n{len(items)} Ergebnisse vom Shop, passend: {sum(search.matches(i, criteria) for i in items)}")
+    for item in items:
+        mark = "✓" if search.matches(item, criteria) else "✗"
+        price = f"{item.price:.2f} €" if item.price is not None else "–"
+        print(f"  {mark} {item.status:<9} {price:>10}  {item.title[:80]}")
     await fetcher.close()
 
 

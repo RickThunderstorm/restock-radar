@@ -79,6 +79,14 @@ def test_conflict_prefers_cautious_signal():
     assert res.note
 
 
+def test_conflict_between_available_and_preorder_picks_preorder():
+    # echter Fall (Gate-to-the-Games): Google-Daten „PreOrder“, Knopf „In den Warenkorb“ aktiv
+    url = "https://shop.test/delta"
+    body = '<button class="single_add_to_cart_button">In den Warenkorb</button>'
+    res = run(detect.analyze(url, fetcher_for({url: page(body, jsonld("PreOrder"))})))
+    assert res.status == detect.PREORDER
+
+
 def test_known_button_available_and_disabled():
     url = "https://shop.test/a"
     on = page('<button class="single_add_to_cart_button">In den Warenkorb</button>')
@@ -210,6 +218,18 @@ def test_redirect_to_homepage_is_not_judged():
     res = run(detect.analyze("https://shop.test/products/etb", Fetcher(min_gap=0, transport=httpx.MockTransport(handler))))
     assert res.status == detect.ERROR and "Startseite" in res.reason
     assert not detect._redirected_home("https://s.test/products/etb", "https://s.test/de/products/etb")
+
+
+def test_cent_price_in_google_data_is_corrected():
+    # Theme-Fehler wie bei bobovr.com: schema.org-Preis in Cent, Meta-Tag korrekt
+    data = {"@type": "Product", "name": "Kopfband", "offers": [
+        {"url": "https://s.test/products/k?variant=9", "price": "6599", "priceCurrency": "EUR",
+         "availability": "https://schema.org/InStock"}]}
+    html = page("", '<meta property="og:price:amount" content="65,99">'
+                    f'<script type="application/ld+json">{json.dumps(data)}</script>')
+    url = "https://s.test/products/k?variant=9"
+    res = run(detect.analyze(url, fetcher_for({url: html})))
+    assert res.price == 65.99
 
 
 def test_name_prefers_heading_when_title_is_shop_name():

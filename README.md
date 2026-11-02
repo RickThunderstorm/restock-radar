@@ -40,6 +40,13 @@ Beim ersten Durchlauf werden die vorhandenen Treffer still erfasst. Danach melde
 
 Shopify- und WooCommerce-Shops werden über ihre Such-Schnittstelle abgefragt, alle anderen über die normale Suchseite. Pro Shop und Durchlauf geht nur eine Anfrage raus, alle 3 Minuten. Bremst ein Shop, pausiert er automatisch.
 
+### Neuheiten-Radar: ohne Produktnamen, mit Kategorie-Seiten
+
+- **Suchbegriff leer lassen** und nur Produkttyp und Sprache wählen. Das heißt dann z. B. „alle deutschen Pokémon-Displays“, andere Sammelkartenspiele fallen automatisch raus.
+- **Kategorie-Seiten** (ein Link pro Zeile, z. B. „Pokémon Displays (Deutsch)“ eines Shops): Dort liest Restock-Radar die komplette Produktliste über bis zu drei Seiten. Bei Shopify nimmt es die Kollektions-Daten direkt. So fällt jedes neue Produkt auf, auch wenn du seinen Namen nicht kennst.
+- **Automatisch überwachen:** „Nur neue Treffer“ oder **„Alles, was gerade nicht kaufbar ist“**. Letzteres übernimmt auch vorhandene ausverkaufte und vorbestellbare Treffer als Produkte, bis zur eingestellten Obergrenze (Standard 30). Kommendes hat Vorrang (zuerst mit Erscheinungstermin, dann Vorverkauf), danach Ausverkauftes, günstig vor teuer. Übernommene Produkte werden alle 3 Minuten geprüft.
+- **Erscheinungstermine:** Angaben wie „Erscheint am 14.11.2026“, „Verfügbar ab: 06.11.2026“, „Release KW 47“ oder `releaseDate` in den Google-Daten erscheinen an Treffern und Produkten und in den Meldungen, gekennzeichnet als „laut Shop“.
+
 ### Vom Handy aus
 
 Einstellungen → **Handy-Zugriff im WLAN** einschalten → QR-Code scannen. Das Handy wird dauerhaft freigeschaltet, fremde Geräte im WLAN kommen ohne den Code nicht rein. Beim ersten Mal fragt Windows nach der Firewall: Zugriff in **privaten Netzwerken** erlauben.
@@ -60,6 +67,7 @@ Außerdem erkannt: **Vorbestellung**, **Warteschlangen** (Queue-it – oft das Z
 
 ### Fair zu den Shops
 
+- **Schonmodus** (Einstellungen → Verhalten): höchstens 4 Anfragen pro Shop und Minute, über alle Produkte, Suchen und automatischen Übernahmen zusammen. Wählbar sind 2, 4, 6, 10 oder unbegrenzt. Ist das Budget voll, verschiebt Restock-Radar Prüfungen, statt sie zu senden. Unter **Last pro Shop** siehst du, welcher Shop dadurch gestreckt wird. Das schützt vor allem davor, dass ein Shop deine Internet-Adresse bremst, denn das würde auch deinen normalen Browser treffen, womöglich genau beim Drop.
 - Höchstens alle 30 Sekunden pro Produkt, mit zufälliger Streuung, mindestens 3 Sekunden Abstand pro Shop.
 - Bremst ein Shop (Fehler 429) oder sperrt er, wartet Restock-Radar doppelt so lange (bis 30 Minuten) und hält sich an `Retry-After`.
 - Bot-Schutz und Warteschlangen werden **nicht** umgangen, und es wird nichts automatisch gekauft – das verstößt gegen die AGB der Shops.
@@ -116,6 +124,7 @@ Werkzeuge:
 
 - `tools/probe.py <link>` – zeigt, welche Signale Restock-Radar auf einer Seite findet.
 - `tools/search_probe.py <shop> "<Suchbegriff>" [typ] [sprache]` – zeigt, was ein Suchauftrag in einem Shop findet und welche Treffer warum durchfallen.
+- `tools/category_probe.py <kategorie-link> [typ] [sprache]` – dasselbe für eine Kategorie-Seite, mit Erscheinungsterminen.
 - `tools/fake_shop.py` – Mini-Testshop mit umschaltbarem Lager plus Mini-ntfy, um einen Restock gefahrlos durchzuspielen.
 - `tools/raw.py <link>` – rohe Antwort eines Shops (Status, Weiterleitung, Bot-Schutz).
 

@@ -14,6 +14,7 @@ import httpx
 from selectolax.lexbor import LexborHTMLParser, LexborNode
 
 from .fetcher import Fetcher, Page
+from .release import find_release
 
 AVAILABLE = "available"
 PREORDER = "preorder"
@@ -42,7 +43,7 @@ OUT_PHRASES = [
     "e-mail, wenn verfügbar", "sold out", "out of stock", "currently unavailable",
     "notify me", "coming soon",
 ]
-PRE_PHRASES = ["jetzt vorbestellen", "vorbestellen", "vorbestellung", "vorbestellbar",
+PRE_PHRASES = ["jetzt vorbestellen", "vorbestellen", "vorbestellung", "vorbestellbar", "vorverkauf",
                "pre-order", "preorder", "pre order"]
 BUY_PHRASES = ["in den warenkorb", "warenkorb hinzufügen", "in den einkaufswagen",
                "jetzt kaufen", "sofort kaufen", "add to cart", "add to basket", "buy now"]
@@ -99,6 +100,8 @@ class Result:
     signals: list[Signal] = field(default_factory=list)
     note: str = ""
     retry_after: int | None = None
+    release: str | None = None          # Erscheinungstermin laut Shop, zum Anzeigen („14.11.2026“, „KW 47/2026“)
+    release_date: str | None = None     # dasselbe als ISO-Datum zum Sortieren
 
     @property
     def method_label(self) -> str:
@@ -171,14 +174,17 @@ async def analyze(url: str, fetcher: Fetcher, *, method: str | None = None,
             pass                                    # die Seite selbst liefert ja noch Signale
     if res.platform == "Shopify":
         _shopify_form(res, tree, page.url, variant_id)
+    main_text = _main_text(tree)
     res.signals.extend(s for s in (
         _jsonld_signal(res, tree, page.url, variant_id),
         _microdata_signal(tree),
         _meta_signal(tree),
         _button_signal(tree),
-        _text_signal(tree),
+        _text_signal(main_text),
     ) if s)
     res.name = _pick_name(res.name, tree)
+    if not res.release:
+        res.release, res.release_date = find_release(main_text[:20000])
 
     _decide(res, method)
     return res
@@ -219,8 +225,9 @@ def _decide(res: Result, method: str | None) -> None:
         if chosen.source != "shopify" and len({s.status for s in strong}) > 1:
             # Widerspruch: Viele Shops liefern in den Google-Daten dauerhaft „InStock“.
             # Das Signal, das „nicht kaufbar“ meldet, ist meist das aktuelle – und das,
-            # was beim Restock umspringt.
-            chosen = next(s for s in strong if s.status not in BUYABLE)
+            # was beim Restock umspringt. Bei „verfügbar“ gegen „vorbestellbar“ gilt die Vorbestellung.
+            chosen = (next((s for s in strong if s.status not in BUYABLE), None)
+                      or next((s for s in strong if s.status == PREORDER), None) or chosen)
             res.note = res.note or "Die Signale widersprechen sich – ich beobachte das vorsichtigere."
 
     agree = all(s.status == chosen.status for s in signals if s.weight >= 2)
@@ -240,7 +247,7 @@ def _platform(page: Page) -> str | None:
         return "Shopify"
     low = text[:400000].lower()
     for marker, name in (("woocommerce", "WooCommerce"), ("shopware", "Shopware"),
-                         ("jtl-shop", "JTL-Shop"), ("prestashop", "PrestaShop"),
+                         ("jtl-shop", "JTL-Shop"), ("jtl_token", "JTL-Shop"), ("prestashop", "PrestaShop"),
                          ("mage/cookies", "Magento"), ("magento", "Magento"),
                          ("gambio", "Gambio"), ("oxid", "OXID")):
         if marker in low:
@@ -441,12 +448,17 @@ def _jsonld_signal(res: Result, tree: LexborHTMLParser, base: str, variant_id: s
     product = next((p for p in products if path and isinstance(p.get("url") or p.get("@id"), str)
                     and urlsplit(p.get("url") or p.get("@id")).path.rstrip("/") == path), products[0])
 
+    json_dates = [product.get("releaseDate")] + [o.get("availabilityStarts") for o in _as_list(product.get("offers"))
+                                                 if isinstance(o, dict)]
+    res.release, res.release_date = find_release("", [d for d in json_dates if d])
     statuses, price, currency, per_variant = _offer_info(product, variant_id)
     if isinstance(product.get("name"), str) and product["name"].strip():
         res.name = product["name"].strip()          # der Produktname aus den Google-Daten ist am saubersten
     if not res.image:
         image = _image_url(product.get("image"))
         res.image = urljoin(base, image) if image else None
+    if price is not None and res.price and 99 <= price / res.price <= 101:
+        price = round(price / 100, 2)            # manche Shop-Themes schreiben Cent-Beträge in die Google-Daten
     if price is not None and (res.price is None or per_variant):
         res.price, res.currency = price, currency or res.currency
     if not statuses:
@@ -602,27 +614,42 @@ def _in_skipped_container(node: LexborNode) -> bool:
     return False
 
 
-def _text_signal(tree: LexborHTMLParser) -> Signal | None:
+def _main_text(tree: LexborHTMLParser) -> str:
+    """Sichtbarer Text des Produktbereichs – ohne Kopf, Fuß, Menü und Skripte."""
     root = tree.css_first("main") or tree.css_first('[itemtype*="schema.org/Product"]') or tree.body
     if root is None:
-        return None
+        return ""
     root = LexborHTMLParser(root.html or "")
     for junk in root.css("script, style, noscript, header, footer, nav, aside, template"):
         junk.decompose()
-    status, phrase = text_status(root.body.text(separator=" ") if root.body else "")
+    return root.body.text(separator=" ") if root.body else ""
+
+
+def _text_signal(text: str) -> Signal | None:
+    status, phrase = text_status(text)
     return Signal("text", status, 1, f"„{phrase}“ gefunden") if status else None
+
+
+# Eindeutige Ausverkauft-Hinweise schlagen Warenkorb- und Vorverkaufstexte: Warenkorb-Knöpfe stehen oft auch bei
+# ausverkaufter Ware im HTML, und „Vorverkauf … Ausverkauft“ heißt: das Vorverkaufskontingent ist weg.
+STRONG_OUT_PHRASES = ["ausverkauft", "sold out", "out of stock", "nicht auf lager", "nicht lieferbar", "vergriffen",
+                      "nicht vorrätig", "nicht mehr verfügbar", "momentan nicht verfügbar",
+                      "derzeit nicht verfügbar", "aktuell nicht verfügbar"]
 
 
 def text_status(text: str) -> tuple[str | None, str | None]:
     """Verfügbarkeit aus freiem Text (Seite oder Trefferkarte). Liefert (Status, gefundene Formulierung)."""
     text = re.sub(r"\s+", " ", text).lower()
+    strong_hit = next((p for p in STRONG_OUT_PHRASES if p in text), None)
     out_hit = next((p for p in OUT_PHRASES if p in text), None)
     for phrase in OUT_PHRASES:          # „nicht lieferbar“ darf nicht als „lieferbar“ zählen
         text = text.replace(phrase, " ")
     pre_hit = next((p for p in PRE_PHRASES if p in text), None)
     in_hit = next((p for p in IN_TEXT_PHRASES if p in text), None)
 
-    if pre_hit and not out_hit:
+    if strong_hit:
+        return SOLDOUT, strong_hit
+    if pre_hit:                         # „Vorbestellen – bald verfügbar“ ist eine Vorbestellung
         return PREORDER, pre_hit
     if out_hit and not in_hit:
         return SOLDOUT, out_hit

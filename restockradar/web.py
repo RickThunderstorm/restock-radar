@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -19,7 +20,7 @@ from . import APP_NAME, VERSION, system, watches
 from . import search as finder
 from .db import Database
 from .detect import Result, analyze, normalize_url
-from .fetcher import Fetcher
+from .fetcher import Fetcher, host_key
 from .monitor import MIN_INTERVAL, Monitor, format_price
 from .notify import Message, Notifier, is_configured, new_ntfy_topic, new_pairing_code, ntfy_links, qr_svg
 from .paths import static_dir
@@ -53,6 +54,7 @@ class SettingsIn(BaseModel):
     heartbeat_enabled: bool | None = None
     heartbeat_time: str | None = None
     default_interval: int | None = None
+    shop_budget: int | None = None
     setup_done: bool | None = None
 
 
@@ -80,13 +82,15 @@ class ShopIn(BaseModel):
 
 
 class SearchIn(BaseModel):
-    query: str
+    query: str = ""
     ptype: str = "egal"
     lang: str = "egal"
     max_price: float | None = None
     exclude: str = ""
     priority: str = "laut"
-    auto_watch: bool = False
+    auto_watch: int = 0
+    max_auto: int = 30
+    categories: str = ""
     interval: int | None = None
 
 
@@ -97,7 +101,9 @@ class SearchPatch(BaseModel):
     max_price: float | None = None
     exclude: str | None = None
     priority: str | None = None
-    auto_watch: bool | None = None
+    auto_watch: int | None = None
+    max_auto: int | None = None
+    categories: str | None = None
     enabled: bool | None = None
     interval: int | None = None
 
@@ -181,8 +187,9 @@ def create_app(data_dir: Path, controller: Controller | None = None, *, fetcher:
             "min_interval": MIN_INTERVAL,
             "shops": db.shops(),
             "searches": [_search_view(db, s) for s in db.searches()],
+            "load": _shop_load(db, fetcher, settings),
             "search_meta": {"types": {k: v["label"] for k, v in finder.PRODUCT_TYPES.items()},
-                            "langs": finder.LANGUAGES},
+                            "langs": finder.LANGUAGES, "auto_modes": finder.AUTO_MODES},
         }
 
     # ------------------------------------------------------------------ Shops & Suchaufträge
@@ -224,8 +231,8 @@ def create_app(data_dir: Path, controller: Controller | None = None, *, fetcher:
     @app.post("/api/searches")
     async def add_search(body: SearchIn):
         values = _search_values(body.model_dump())
-        if not db.shops():
-            raise HTTPException(400, "Lege zuerst mindestens einen Shop an.")
+        if not db.shops() and not values.get("categories"):
+            raise HTTPException(400, "Lege zuerst mindestens einen Shop an – oder gib eine Kategorie-Seite an.")
         search_id = db.add_search(**values)
         monitor._spawn(monitor.check_search_now(search_id))      # erster Durchlauf sofort
         return _search_view(db, db.search(search_id))
@@ -234,8 +241,8 @@ def create_app(data_dir: Path, controller: Controller | None = None, *, fetcher:
     async def patch_search(search_id: int, body: SearchPatch):
         if not db.search(search_id):
             raise HTTPException(404, "Nicht gefunden")
-        values = _search_values(body.model_dump(exclude_unset=True), partial=True)
-        if values.keys() & {"query", "ptype", "lang", "max_price", "exclude"}:
+        values = _search_values(body.model_dump(exclude_unset=True), partial=True, current=db.search(search_id))
+        if values.keys() & {"query", "ptype", "lang", "max_price", "exclude", "categories"}:
             # Andere Filter = andere Treffer: neu und still erfassen, statt alles als „neu“ zu melden
             db.clear_hits(search_id)
             values.update(baseline="[]", next_check=0)
@@ -265,6 +272,7 @@ def create_app(data_dir: Path, controller: Controller | None = None, *, fetcher:
         result = await analyze(hit["url"], fetcher)
         if result.status == "error":
             raise HTTPException(400, result.reason or "Seite nicht lesbar")
+        watches.fill_from_hit(result, hit)
         search_row = db.search(hit["search_id"])
         watch = watches.add_watch(db, result, priority=search_row["priority"] if search_row else "laut",
                                   note="Aus Suchtreffer übernommen")
@@ -326,6 +334,8 @@ def create_app(data_dir: Path, controller: Controller | None = None, *, fetcher:
                 value = max(MIN_INTERVAL, value)
             if key == "heartbeat_time" and not _valid_time(value):
                 raise HTTPException(400, "Uhrzeit bitte als HH:MM")
+            if key == "shop_budget":
+                value = min(30, max(0, value))
             db.set_setting(key, value)
         return _public_settings(db.settings())
 
@@ -433,33 +443,87 @@ def create_app(data_dir: Path, controller: Controller | None = None, *, fetcher:
 
 # ---------------------------------------------------------------------- Hilfen
 
-def _search_values(values: dict, partial: bool = False) -> dict:
-    if "query" in values or not partial:
-        query = (values.get("query") or "").strip()
-        if not finder.alternatives(query):
-            raise HTTPException(400, "Bitte einen Suchbegriff eingeben.")
-        values["query"] = query
+def _search_values(values: dict, partial: bool = False, current: dict | None = None) -> dict:
+    if "query" in values:
+        values["query"] = " | ".join(finder.alternatives(values["query"] or ""))
+    if "categories" in values:
+        urls = []
+        for line in (values["categories"] or "").splitlines():
+            url = normalize_url(line)
+            if url and not re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}", urlsplit(url).hostname or ""):
+                raise HTTPException(400, f"„{line.strip()}“ ist kein Link.")
+            if url and url not in urls:
+                urls.append(url)
+        values["categories"] = "\n".join(urls)
     if "ptype" in values and values["ptype"] not in finder.PRODUCT_TYPES:
         raise HTTPException(400, "Unbekannter Produkttyp")
+    merged = {**(current or {}), **values}
+    if not merged.get("query") and not merged.get("categories") and (merged.get("ptype") or "egal") == "egal":
+        raise HTTPException(400, "Gib einen Suchbegriff, einen Produkttyp oder eine Kategorie-Seite an – "
+                                 "sonst wäre die Suche zu breit.")
     if "lang" in values and values["lang"] not in finder.LANGUAGES:
         raise HTTPException(400, "Unbekannte Sprache")
     if "priority" in values and values["priority"] not in ("laut", "leise"):
         raise HTTPException(400, "Priorität muss „laut“ oder „leise“ sein")
+    if "auto_watch" in values and values["auto_watch"] is not None:
+        values["auto_watch"] = int(values["auto_watch"])
+        if values["auto_watch"] not in finder.AUTO_MODES:
+            raise HTTPException(400, "Unbekannte Einstellung für automatisches Überwachen")
+    if values.get("max_auto") is not None:
+        values["max_auto"] = min(100, max(1, int(values["max_auto"])))
     if values.get("max_price") is not None and values["max_price"] <= 0:
         values["max_price"] = None
-    for key in ("auto_watch", "enabled"):
-        if key in values and values[key] is not None:
-            values[key] = int(values[key])
+    if "enabled" in values and values["enabled"] is not None:
+        values["enabled"] = int(values["enabled"])
     if values.get("interval") is not None:
         values["interval"] = max(60, values["interval"])
     elif "interval" in values:
         values.pop("interval")
-    return values
+    return {k: v for k, v in values.items() if v is not None or k == "max_price"}
+
+
+def _shop_load(db: Database, fetcher: Fetcher, settings: dict) -> list[dict]:
+    """Geplante Anfragen pro Shop und Minute – und ob der Schonmodus sie strecken muss."""
+    planned: dict[str, float] = {}
+
+    def add(url: str, per_minute: float) -> None:
+        host = host_key(url)
+        if host:
+            planned[host] = planned.get(host, 0.0) + per_minute
+
+    for watch in db.watches():
+        if watch["enabled"]:
+            add(watch["url"], 60 / max(MIN_INTERVAL, watch["interval"] or 60))
+    shops = [s for s in db.shops() if s["enabled"]]
+    for search in db.searches():
+        if not search["enabled"]:
+            continue
+        rate = 60 / max(60, search["interval"] or 180)
+        categories = finder.search_categories(search)
+        if search["query"] or not categories:
+            for shop in shops:
+                add(shop["base"], rate * max(1, len(finder.alternatives(search["query"] or ""))))
+        for url in categories:
+            add(url, rate)
+    limit = int(settings.get("shop_budget") or 0)
+    recent = fetcher.loads()
+    rows = []
+    for host in sorted(set(planned) | set(recent), key=lambda h: -planned.get(h, 0)):
+        rate = planned.get(host, 0.0)
+        rows.append({"host": host, "planned": round(rate, 1), "recent": recent.get(host, 0), "limit": limit,
+                     "stretch": round(rate / limit, 1) if limit and rate > limit else None})
+    return rows
 
 
 def _search_view(db: Database, search: dict) -> dict:
     hits = db.hits(search["id"])
-    return {**search, "hit_count": len(hits), "hits": hits[:30]}
+    existing = {w["id"] for w in db.watches()}
+    for hit in hits:
+        hit["shop_name"] = hit["shop_name"] or (urlsplit(hit["url"]).hostname or "").removeprefix("www.")
+        hit["watched"] = bool(hit["watch_id"] and hit["watch_id"] in existing)
+    return {**search, "label": finder.search_label(search), "hit_count": len(hits),
+            "auto_count": sum(1 for h in hits if h["watched"]),
+            "category_list": finder.search_categories(search), "hits": hits[:30]}
 
 
 def _public_settings(settings: dict) -> dict:

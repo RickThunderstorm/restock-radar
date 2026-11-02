@@ -27,7 +27,10 @@ const ICONS = {
   radar: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="m12 12 6-6"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
   store: '<path d="M3 9l2-5h14l2 5"/><path d="M4 9v11h16V9"/><path d="M3 9h18"/><path d="M9 20v-6h6v6"/>',
+  calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/>',
+  list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
 };
+const releaseChip = (text) => (text ? `<span class="chip date" title="Erscheinungstermin laut Shop – kann sich verschieben">${icon("calendar")} erscheint ${esc(text)}</span>` : "");
 const icon = (name, cls = "i") =>
   `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 
@@ -46,6 +49,8 @@ const statusOf = (status, reason) => (isThrottled(status, reason) ? THROTTLED : 
 const BUYABLE = ["available", "preorder"];
 const PROBLEM = ["blocked", "error", "unknown"];
 const INTERVALS = [30, 60, 120, 300, 600];
+const BUDGETS = [[2, "2 pro Minute – sehr schonend"], [4, "4 pro Minute – empfohlen"], [6, "6 pro Minute"],
+  [10, "10 pro Minute – schnell"], [0, "Unbegrenzt"]];
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -81,7 +86,7 @@ const ui = {
   preview: null, previewLoading: false, prio: "laut", interval: 60, variant: null,
   panelOpen: false, wizardStep: null, wizardChannel: null,
   ntfyOpen: false, tg: null, tgTimer: null, dcEdit: false,
-  mode: "link", searchPrio: "laut", searchAuto: false, searchFormBuilt: false, openSearches: new Set(),
+  mode: "link", searchPrio: "laut", searchFormBuilt: false, openSearches: new Set(),
   keys: { watches: "", events: "", searches: "", shops: "" }, offline: false,
 };
 const SHOP_STATUS = {
@@ -136,6 +141,7 @@ function renderAll() {
   renderWatches();
   renderEvents();
   if (ui.mode === "search") renderShopsLine();
+  if (ui.panelOpen) renderLoad();
 }
 
 function tick() {
@@ -336,25 +342,29 @@ function renderSearchForm() {
   ui.searchFormBuilt = true;
   const meta = S.search_meta;
   const options = (map, sel) => Object.entries(map).map(([k, v]) => `<option value="${esc(k)}" ${k === sel ? "selected" : ""}>${esc(v)}</option>`).join("");
+  const autoModes = Object.entries(meta.auto_modes).map(([k, v]) => `<option value="${k}" ${k === "2" ? "selected" : ""}>${esc(v)}</option>`).join("");
   $("#search-form").innerHTML = `
-    <label class="add-label" for="s-query">Wonach soll ich in deinen Shops suchen?</label>
+    <label class="add-label" for="s-query">Wonach soll ich Ausschau halten?</label>
     <div class="search-grid">
-      <label class="field first"><span>Suchbegriff <span class="hint">– mehrere Schreibweisen mit | trennen</span></span>
-        <input type="text" id="s-query" placeholder="z. B. Prismatische Entwicklungen | Prismatic Evolutions" required></label>
+      <label class="field first"><span>Suchbegriff <span class="hint">– optional · leer = alle Pokémon-Produkte des Typs · Schreibweisen mit | trennen</span></span>
+        <input type="text" id="s-query" placeholder="z. B. Delta-Herrschaft | Delta Reign – oder leer lassen"></label>
       <label class="field"><span>Produkttyp</span><select id="s-ptype">${options(meta.types, "display")}</select></label>
       <label class="field"><span>Sprache</span><select id="s-lang">${options(meta.langs, "de")}</select></label>
       <label class="field"><span>Höchstpreis in € <span class="hint">– optional</span></span>
         <input type="text" id="s-max" inputmode="decimal" placeholder="z. B. 250"></label>
       <label class="field span2"><span>Ohne diese Wörter <span class="hint">– optional, mit Komma getrennt</span></span>
-        <input type="text" id="s-exclude" placeholder="z. B. PSA, gradiert, leer"></label>
+        <input type="text" id="s-exclude" placeholder="z. B. PSA, gradiert"></label>
+      <label class="field full"><span>Kategorie-Seiten <span class="hint">– optional, ein Link pro Zeile, z. B. die Seite „Pokémon Displays (Deutsch)“ eines Shops. Dort sehe ich alle Produkte, nicht nur Suchtreffer.</span></span>
+        <textarea id="s-cats" rows="2" placeholder="https://shop.de/pokemon/displays-deutsch"></textarea></label>
     </div>
     <div class="search-foot">
       <div class="segmented" role="group" aria-label="Benachrichtigung">
         <button type="button" data-sprio="laut" aria-pressed="${ui.searchPrio === "laut"}">${icon("bell")} Laut</button>
         <button type="button" data-sprio="leise" aria-pressed="${ui.searchPrio === "leise"}">${icon("bellOff")} Leise</button>
       </div>
-      <label class="inline-switch"><span class="switch"><input type="checkbox" id="s-auto" ${ui.searchAuto ? "checked" : ""}><span></span></span>
-        Neue Treffer automatisch überwachen</label>
+      <label class="field inline"><span>Automatisch überwachen</span>
+        <span class="row"><select id="s-auto">${autoModes}</select>
+        <span class="hint">höchstens</span><input type="text" id="s-max-auto" inputmode="numeric" value="30" class="tiny" aria-label="Höchstens so viele Produkte"></span></label>
       <span class="shops-line" id="shops-line"></span>
       <button class="btn primary" type="submit">${icon("search")} Suche anlegen</button>
     </div>`;
@@ -369,17 +379,21 @@ function renderShopsLine() {
   el.dataset.key = key;
   el.innerHTML = active.length
     ? `Durchsucht ${active.length} ${active.length === 1 ? "Shop" : "Shops"}: ${active.slice(0, 4).map((s) => esc(s.name)).join(", ")}${active.length > 4 ? " …" : ""} · <button type="button" class="link-btn" data-open-shops>Shops verwalten</button>`
-    : `<span style="color:var(--warn)">${icon("alert")} Noch keine Shops hinterlegt.</span> <button type="button" class="link-btn" data-open-shops>Shop hinzufügen</button>`;
+    : `<span style="color:var(--warn)">${icon("alert")} Noch keine Shops – nur Kategorie-Seiten möglich.</span> <button type="button" class="link-btn" data-open-shops>Shop hinzufügen</button>`;
 }
 
 async function submitSearch(form) {
   const max = $("#s-max").value.trim().replace(",", ".");
   const body = {
     query: $("#s-query").value, ptype: $("#s-ptype").value, lang: $("#s-lang").value,
-    max_price: max ? Number(max) : null, exclude: $("#s-exclude").value,
-    priority: ui.searchPrio, auto_watch: $("#s-auto").checked,
+    max_price: max ? Number(max) : null, exclude: $("#s-exclude").value, categories: $("#s-cats").value,
+    priority: ui.searchPrio, auto_watch: Number($("#s-auto").value), max_auto: Number($("#s-max-auto").value) || 30,
   };
   if (max && !(Number(max) > 0)) { toast("Höchstpreis bitte als Zahl, z. B. 250", true); return; }
+  if (!body.query.trim() && !body.categories.trim() && body.ptype === "egal") {
+    toast("Wähle einen Produkttyp, gib einen Suchbegriff ein oder eine Kategorie-Seite an – sonst wird es zu breit.", true);
+    return;
+  }
   const button = form.querySelector('button[type="submit"]');
   button.disabled = true;
   try {
@@ -388,6 +402,7 @@ async function submitSearch(form) {
     $("#s-query").value = "";
     $("#s-max").value = "";
     $("#s-exclude").value = "";
+    $("#s-cats").value = "";
     ui.keys.searches = "";
     await refresh();
     setTimeout(refresh, 4000);
@@ -400,7 +415,7 @@ async function submitSearch(form) {
 
 function renderSearches() {
   const key = JSON.stringify([S.searches.map((s) => [s.id, s.enabled, s.priority, s.auto_watch, s.last_check, s.hit_count,
-    s.hits.map((h) => [h.id, h.status, h.price, h.watch_id])]), [...ui.openSearches]]);
+    s.auto_count, s.last_error, s.hits.map((h) => [h.id, h.status, h.price, h.watched, h.release])]), [...ui.openSearches]]);
   if (key === ui.keys.searches) return;
   ui.keys.searches = key;
   $("#searches-section").hidden = !S.searches.length;
@@ -409,15 +424,19 @@ function renderSearches() {
 
 function searchCard(s) {
   const meta = S.search_meta;
+  const cats = s.category_list || [];
   const chips = [
-    s.ptype !== "egal" ? meta.types[s.ptype] : null,
+    s.query && s.ptype !== "egal" ? meta.types[s.ptype] : null,
     s.lang !== "egal" ? meta.langs[s.lang] : null,
     s.max_price ? `bis ${priceText(s.max_price, "EUR")}` : null,
     s.exclude ? `ohne ${s.exclude}` : null,
   ].filter(Boolean).map((c) => `<span class="chip">${esc(c)}</span>`).join("")
-    + (s.auto_watch ? `<span class="chip ok">Auto-Überwachung</span>` : "");
+    + (cats.length ? `<span class="chip" title="${esc(cats.join("\n"))}">${icon("list")} ${cats.length} ${cats.length === 1 ? "Kategorie-Seite" : "Kategorie-Seiten"}</span>` : "")
+    + (s.auto_watch ? `<span class="chip ok" title="${esc(meta.auto_modes[s.auto_watch])}">Auto: ${s.auto_watch === 2 ? "nicht Kaufbares" : "neue"} · ${s.auto_count}/${s.max_auto}</span>` : "");
   const loud = s.priority === "laut";
-  const shopsCount = S.shops.filter((x) => x.enabled).length;
+  const shopsCount = s.query || !cats.length ? S.shops.filter((x) => x.enabled).length : 0;
+  const sources = [shopsCount ? `${shopsCount} ${shopsCount === 1 ? "Shop" : "Shops"}` : null,
+    cats.length ? `${cats.length} ${cats.length === 1 ? "Kategorie" : "Kategorien"}` : null].filter(Boolean).join(" + ");
   const open = ui.openSearches.has(s.id);
   const shown = open ? s.hits : s.hits.slice(0, 6);
   const fresh = nowSec() - 2 * 86400;
@@ -430,8 +449,9 @@ function searchCard(s) {
       <div><a class="t" href="${esc(safeUrl(h.url))}" target="_blank" rel="noopener">${esc(h.title)}</a><div class="s">${sub}</div></div>
       <div class="side">
         ${h.is_new && h.first_seen > fresh ? `<span class="chip new">Neu</span>` : ""}
+        ${releaseChip(h.release)}
         <span class="badge ${st.cls}">${st.label}</span>
-        ${h.watch_id ? `<span class="chip ok">${icon("check")} Überwacht</span>` : `<button class="btn small" data-act="hit-watch">${icon("radar")} Überwachen</button>`}
+        ${h.watched ? `<span class="chip ok">${icon("check")} Überwacht</span>` : `<button class="btn small" data-act="hit-watch">${icon("radar")} Überwachen</button>`}
       </div></li>`;
   }).join("")}</ul>` : `<div class="hits-empty">${s.last_check ? `Noch keine passenden Treffer – ich suche alle ${intervalLabel(s.interval)} weiter.` : `<span class="loading"><span class="spinner"></span>Erster Durchlauf läuft …</span>`}</div>`;
   const more = s.hits.length > 6 ? `<button class="link-btn small" data-act="more" style="margin-top:8px">${open ? "Weniger anzeigen" : `Alle ${s.hit_count} Treffer anzeigen`}</button>` : "";
@@ -439,9 +459,10 @@ function searchCard(s) {
     <article class="search-card ${s.enabled ? "" : "is-paused"}" data-sid="${s.id}">
       <div class="search-head">
         <div class="grow">
-          <h3>${icon("search")} ${esc(s.query)}</h3>
+          <h3>${icon("search")} ${esc(s.label)}</h3>
           ${chips ? `<div class="chips">${chips}</div>` : ""}
-          <div class="meta">${s.enabled ? `geprüft <span data-rel="${s.last_check || 0}">${rel(s.last_check)}</span> · alle ${intervalLabel(s.interval)}` : "pausiert"} · ${s.hit_count} Treffer · ${shopsCount} ${shopsCount === 1 ? "Shop" : "Shops"}</div>
+          <div class="meta">${s.enabled ? `geprüft <span data-rel="${s.last_check || 0}">${rel(s.last_check)}</span> · alle ${intervalLabel(s.interval)}` : "pausiert"} · ${s.hit_count} Treffer · ${sources}</div>
+          ${s.last_error ? `<div class="problem">${icon("alert")} ${esc(s.last_error)}</div>` : ""}
         </div>
         <div class="actions">
           <button class="icon-btn ${loud ? "on" : ""}" data-act="prio" title="${loud ? "Laut – Alarm bei neuen, kaufbaren Treffern" : "Leise – nur stille Meldung"}" aria-label="Lautstärke umschalten">${icon(loud ? "bell" : "bellOff")}</button>
@@ -471,9 +492,9 @@ async function onSearchAction(e) {
     } else if (act === "check") {
       btn.classList.add("spin");
       const res = await api(`/api/searches/${s.id}/check`, { method: "POST" });
-      toast(`„${res.query}“: ${res.hit_count} Treffer`);
+      toast(`„${res.label}“: ${res.hit_count} Treffer`);
     } else if (act === "delete") {
-      if (!confirm(`Suche „${s.query}“ löschen?`)) return;
+      if (!confirm(`Suche „${s.label}“ löschen? Automatisch übernommene Produkte bleiben in deiner Liste.`)) return;
       await api(`/api/searches/${s.id}`, { method: "DELETE" });
     } else if (act === "hit-watch") {
       btn.disabled = true;
@@ -494,7 +515,7 @@ async function onSearchAction(e) {
 /* ================================================================ Produktliste */
 
 function renderWatches() {
-  const key = JSON.stringify(S.watches.map((w) => [w.id, w.status, w.enabled, w.priority, w.last_check, w.price, w.reason, w.note, w.name, w.cart_url]));
+  const key = JSON.stringify(S.watches.map((w) => [w.id, w.status, w.enabled, w.priority, w.last_check, w.price, w.reason, w.note, w.name, w.cart_url, w.release]));
   if (key === ui.keys.watches) return;
   ui.keys.watches = key;
   const el = $("#watches");
@@ -522,6 +543,7 @@ function watchCard(w) {
         <a class="name" href="${esc(safeUrl(w.url))}" target="_blank" rel="noopener">${esc(w.name || w.url)}</a>
         <div class="sub">${sub}</div>
         <div class="meta">${w.enabled ? `geprüft <span data-rel="${w.last_check || 0}">${rel(w.last_check)}</span> · alle ${intervalLabel(w.interval)}` : "pausiert"} · ${method}</div>
+        ${w.release || w.auto ? `<div class="chips">${releaseChip(w.release)}${w.auto ? `<span class="chip">${icon("search")} aus Suchauftrag</span>` : ""}</div>` : ""}
         ${problem}${note}
       </div>
       <div class="side">
@@ -812,7 +834,15 @@ function renderPanel() {
         <div class="grow"><b>Standard-Prüfintervall</b><p>Für neue Produkte. Schneller als 30 Sekunden geht nicht – aus Fairness gegenüber den Shops.</p></div>
         <select data-setting="default_interval" aria-label="Prüfintervall">${INTERVALS.map((s) => `<option value="${s}" ${s === set.default_interval ? "selected" : ""}>${intervalLabel(s)}</option>`).join("")}</select>
       </div>
+      <div class="setting-row">
+        <div class="grow"><b>Schonmodus</b><p>Höchstens so viele Anfragen pro Shop und Minute – über alle Produkte und Suchen zusammen. Schützt davor, dass ein Shop deine Internet-Adresse bremst.</p></div>
+        <select data-setting="shop_budget" aria-label="Anfragen pro Shop und Minute">${BUDGETS.map(([v, l]) => `<option value="${v}" ${v === Number(set.shop_budget) ? "selected" : ""}>${l}</option>`).join("")}</select>
+      </div>
     </div></div>
+    <div class="card" id="load-card">
+      <div class="card-head"><div class="grow"><h3>Last pro Shop</h3><p>Geplante Anfragen pro Minute. Liegt ein Shop über dem Schonmodus, prüft Restock-Radar dort entsprechend seltener.</p></div></div>
+      <div class="card-body" id="load-list">${loadList()}</div>
+    </div>
 
     <div class="group-title">Gerät</div>
     <div class="card" id="lan-card">
@@ -834,6 +864,24 @@ function renderPanel() {
     </div></div>` : ""}
     <p class="muted small" style="text-align:center">Restock-Radar ${esc(S.version)} · <button class="link-btn" data-act-wizard>Einrichtung erneut starten</button></p>`;
   if (set.lan_enabled && !ui.lan) loadLan();
+}
+
+function loadList() {
+  const rows = S.load || [];
+  if (!rows.length) return `<div class="muted small">Noch keine Shops in Benutzung.</div>`;
+  const num = (x) => String(x).replace(".", ",");
+  return `<ul class="shop-list">${rows.map((r) => `
+    <li>${icon("store")}
+      <div class="grow"><div class="n">${esc(r.host)}</div>
+        <div class="d">geplant ${num(r.planned)} pro Min.${r.limit ? ` · erlaubt ${r.limit}` : ""} · letzte Minute ${r.recent}</div></div>
+      ${r.stretch ? `<span class="chip warn" title="Prüfungen in diesem Shop dauern etwa ${num(r.stretch)}-mal so lange">gestreckt ×${num(r.stretch)}</span>`
+        : `<span class="chip ok">im Rahmen</span>`}
+    </li>`).join("")}</ul>`;
+}
+
+function renderLoad() {
+  const el = $("#load-list");
+  if (el && S) el.innerHTML = loadList();
 }
 
 function shopsCard() {
@@ -874,7 +922,7 @@ async function onPanelChange(e) {
   try {
     if (t.dataset.setting) {
       const key = t.dataset.setting;
-      const value = t.type === "checkbox" ? t.checked : key === "default_interval" ? Number(t.value) : t.value;
+      const value = t.type === "checkbox" ? t.checked : ["default_interval", "shop_budget"].includes(key) ? Number(t.value) : t.value;
       await api("/api/settings", { method: "PUT", body: { [key]: value } });
       toast("Gespeichert");
     } else if ("lan" in t.dataset) {
@@ -1049,7 +1097,6 @@ function wire() {
     ui.searchPrio = b.dataset.sprio;
     document.querySelectorAll("[data-sprio]").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.sprio === ui.searchPrio)));
   });
-  $("#search-form").addEventListener("change", (e) => { if (e.target.id === "s-auto") ui.searchAuto = e.target.checked; });
   document.addEventListener("click", (e) => {
     if (e.target.closest("[data-open-settings]")) openPanel();
     if (e.target.closest("[data-open-shops]")) openPanel("shops-card");

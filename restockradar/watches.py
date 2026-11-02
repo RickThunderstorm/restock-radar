@@ -10,8 +10,19 @@ from .detect import AVAILABLE, BUYABLE, SOLDOUT, Result
 MIN_INTERVAL = 30
 
 
+def fill_from_hit(result: Result, hit: dict | None) -> Result:
+    """Was die Produktseite nicht verrät, aber die Trefferkarte schon wusste (Preis, Bild, Name, Termin)."""
+    if hit:
+        result.price = result.price if result.price is not None else hit["price"]
+        result.image = result.image or hit["image"]
+        result.name = result.name or hit["title"]
+        if not result.release and hit.get("release"):
+            result.release, result.release_date = hit["release"], hit.get("release_date")
+    return result
+
+
 def add_watch(db: Database, result: Result, *, priority: str = "laut", interval: int | None = None,
-              variant_id: str | None = None, note: str = "Wird jetzt überwacht") -> dict:
+              variant_id: str | None = None, note: str = "Wird jetzt überwacht", auto: bool = False) -> dict:
     variant_title, price, stock, cart_url = result.variant_title, result.price, result.status, result.cart_url
     variant = next((v for v in result.variants if v["id"] == variant_id), None) if variant_id else None
     if variant:
@@ -31,6 +42,7 @@ def add_watch(db: Database, result: Result, *, priority: str = "laut", interval:
         status=stock, stock=stock if stock in (*BUYABLE, SOLDOUT) else None,
         confidence=result.confidence, rating=result.rating, reason=result.reason, note=result.note,
         priority=priority if priority in ("laut", "leise") else "laut",
-        interval=interval, last_check=now, next_check=now + interval)
+        interval=interval, last_check=now, next_check=now + interval,
+        release=result.release, release_date=result.release_date, auto=int(auto))
     db.add_event(watch_id, "info", note)
     return db.watch(watch_id)

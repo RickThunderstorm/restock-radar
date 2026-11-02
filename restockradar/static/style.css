@@ -141,6 +141,14 @@ details.signals summary { cursor: pointer; color: var(--muted); font-weight: 600
 .mode-switch { margin-bottom: 14px; }
 .search-grid { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px 16px; }
 .search-grid .span2 { grid-column: span 2; }
+.search-grid .full { grid-column: 1 / -1; }
+textarea { width: 100%; padding: 9px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong);
+  background: var(--panel); color: var(--text); font: inherit; resize: vertical; min-height: 40px; }
+.field.inline .row { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
+input.tiny, .row > input.tiny { width: 56px; min-width: 0; flex: none; text-align: center; }
+.chip.date { background: var(--pre-soft); color: var(--pre); }
+.chip svg.i { width: 13px; height: 13px; }
+.watch .chips { margin: 4px 0 0; }
 .search-grid input, .search-grid select { width: 100%; }
 .field .hint { font-size: 12px; color: var(--faint); font-weight: 400; }
 .search-foot { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin-top: 14px; }

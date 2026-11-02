@@ -7,13 +7,15 @@ import logging
 import random
 import time
 from datetime import datetime
+from urllib.parse import urlsplit
 
 from .db import Database
 from .detect import AVAILABLE, BLOCKED, BUYABLE, ERROR, PREORDER, QUEUE, SOLDOUT, UNKNOWN, Result, analyze
-from .fetcher import Fetcher
+from .fetcher import Fetcher, host_key
 from .notify import Message, Notifier, is_configured
-from .search import SearchError, alternatives, matches, run_search, shop_query
-from .watches import add_watch
+from .search import (AUTO_NEW, AUTO_UNAVAILABLE, SearchError, fetch_category, matches, search_categories,
+                     search_label, search_shop)
+from .watches import add_watch, fill_from_hit
 
 log = logging.getLogger("restockradar")
 
@@ -24,6 +26,8 @@ COOLDOWN = 5 * 60          # gegen Flackern: dieselbe Seite höchstens alle 5 Mi
 QUEUE_REPEAT = 30 * 60
 PARALLEL = 4
 SEARCH_MIN_INTERVAL = 60    # Suchaufträge höchstens jede Minute
+AUTO_INTERVAL = 180         # automatisch übernommene Produkte alle 3 Minuten prüfen – schont die Shops
+SLOT_PATIENCE = 20          # so lange wartet ein Suchauftrag höchstens auf einen freien Platz im Shop-Budget
 SHOP_PAUSE = {"throttled": 10 * 60, BLOCKED: 30 * 60, QUEUE: 5 * 60, "error": 5 * 60}
 
 STATUS_WORDS = {
@@ -39,6 +43,7 @@ class Monitor:
         self.notifier = notifier
         self._running: set[int] = set()
         self._running_searches: set[int] = set()
+        self._auto_running: set[int] = set()
         self._tasks: set[asyncio.Task] = set()
         self._sem = asyncio.Semaphore(PARALLEL)
 
@@ -46,9 +51,7 @@ class Monitor:
         while True:
             try:
                 now = time.time()
-                for watch in self.db.due_watches(now):
-                    if watch["id"] not in self._running:
-                        self._spawn(self._guarded(watch))
+                self._schedule_watches(now)
                 for search in self.db.due_searches(now):
                     if search["id"] not in self._running_searches:
                         self._spawn(self._guarded_search(search))
@@ -118,6 +121,8 @@ class Monitor:
             upd["price"] = res.price
         if res.cart_url:
             upd["cart_url"] = res.cart_url
+        if res.release:
+            upd.update(release=res.release, release_date=res.release_date)
         if res.image and not watch["image"]:
             upd["image"] = res.image
 
@@ -178,56 +183,86 @@ class Monitor:
             self._running_searches.discard(search["id"])
 
     async def check_search(self, search: dict) -> None:
-        """Fragt alle aktiven Shops ab. Beim ersten Mal je Shop werden vorhandene Treffer still erfasst."""
+        """Fragt Shopsuchen und Kategorie-Seiten ab. Je Quelle wird beim ersten Mal still erfasst."""
         now = time.time()
         baseline = set(json.loads(search["baseline"] or "[]"))
-        for shop in self.db.shops():
-            if not shop["enabled"] or (shop["paused_until"] or 0) > now:
+        categories = search_categories(search)
+        errors: list[str] = []
+
+        if (search["query"] or "").strip() or not categories:
+            for shop in self.db.shops():
+                if not shop["enabled"] or (shop["paused_until"] or 0) > now:
+                    continue
+                if not await self._take_slot(host_key(shop["base"])):
+                    continue                        # Budget voll – dieser Shop ist beim nächsten Durchlauf dran
+                try:
+                    items = await search_shop(shop, search, self.fetcher)
+                except SearchError as err:
+                    kind = "throttled" if "bremst" in err.reason else err.status
+                    pause = max(SHOP_PAUSE.get(kind, 300), min(err.retry_after or 0, MAX_BACKOFF))
+                    self.db.update_shop(shop["id"], status=kind, reason=err.reason, paused_until=now + pause, last_check=now)
+                    continue
+                self.db.update_shop(shop["id"], status="ok", reason="", paused_until=0, last_check=now)
+                self._handle_items(search, shop, items, silent=shop["id"] not in baseline)
+                baseline.add(shop["id"])
+
+        for url in categories:
+            host = urlsplit(url).hostname or url
+            shop = self.db.shop_by_host(host) or {"id": None, "name": host.removeprefix("www.")}
+            if not await self._take_slot(host_key(url)):
                 continue
             try:
-                items = []
-                for alt in alternatives(search["query"]):
-                    items += await run_search(shop, shop_query(alt, search["ptype"]), self.fetcher)
+                items = await fetch_category(url, self.fetcher)
             except SearchError as err:
-                kind = "throttled" if "bremst" in err.reason else err.status
-                pause = max(SHOP_PAUSE.get(kind, 300), min(err.retry_after or 0, MAX_BACKOFF))
-                self.db.update_shop(shop["id"], status=kind, reason=err.reason, paused_until=now + pause, last_check=now)
+                errors.append(f"{shop['name']}: {err.reason}")
                 continue
-            self.db.update_shop(shop["id"], status="ok", reason="", paused_until=0, last_check=now)
-            silent = shop["id"] not in baseline
-            seen: set[str] = set()
-            for item in items:
-                if item.url not in seen and matches(item, search):
-                    seen.add(item.url)
-                    self._handle_hit(search, shop, item, silent)
-            baseline.add(shop["id"])
+            key = f"cat:{url}"
+            self._handle_items(search, shop, items, silent=key not in baseline)
+            baseline.add(key)
+
         interval = max(SEARCH_MIN_INTERVAL, search["interval"] or 180)
-        self.db.update_search(search["id"], baseline=json.dumps(sorted(baseline)), last_check=now,
-                              next_check=now + interval * random.uniform(0.9, 1.1))
+        self.db.update_search(search["id"], baseline=json.dumps(sorted(baseline, key=str)), last_check=now,
+                              last_error="; ".join(errors), next_check=now + interval * random.uniform(0.9, 1.1))
+        if search["auto_watch"] == AUTO_UNAVAILABLE:
+            self._start_auto_watch(self.db.search(search["id"]))
+
+    def _handle_items(self, search: dict, shop: dict, items: list, silent: bool) -> None:
+        seen: set[str] = set()
+        for item in items:
+            if item.url not in seen and matches(item, search):
+                seen.add(item.url)
+                self._handle_hit(search, shop, item, silent)
 
     def _handle_hit(self, search: dict, shop: dict, item, silent: bool) -> None:
         now = time.time()
-        label = f"Suche „{search['query']}“"
+        label = f"Suche „{search_label(search)}“"
         existing = self.db.hit_by_url(search["id"], item.url)
         if not existing:
             hit_id = self.db.add_hit(search_id=search["id"], shop_id=shop["id"], url=item.url, title=item.title,
                                      price=item.price, currency=item.currency, image=item.image, status=item.status,
+                                     release=item.release, release_date=item.release_date,
                                      is_new=0 if silent else 1, first_seen=now, last_seen=now, last_change=now)
             if silent:
                 return
             buyable = item.status in BUYABLE
             self.db.add_event(None, "restock" if buyable else "info", f"{label}: neu bei {shop['name']} – {item.title}")
             parts = [None if buyable else STATUS_WORDS.get(item.status), format_price(item.price, item.currency), shop["name"]]
+            text = " · ".join(p for p in parts if p)
+            if item.release:
+                text += f"\nErscheint laut Shop: {item.release}"
+            headline = {AVAILABLE: "🆕 Neu & verfügbar: ", PREORDER: "🆕 Neu & vorbestellbar: "}.get(item.status, "🆕 Neu gelistet: ")
             self._spawn(self._send(None, Message(
-                ("🆕 Neu & verfügbar: " if buyable else "🆕 Neu gelistet: ") + item.title,
-                " · ".join(p for p in parts if p) + f"\nGefunden über „{search['query']}“",
+                headline + item.title,
+                text + f"\nGefunden über {label}",
                 item.url, image=item.image, loud=buyable and search["priority"] == "laut",
                 kind="restock" if buyable else "info")))
-            if search["auto_watch"]:
+            if search["auto_watch"] == AUTO_NEW and self._auto_room(search) > 0:
                 self._spawn(self._auto_watch(hit_id, item.url, search))
             return
 
         upd = {"last_seen": now, "title": item.title, "price": item.price, "image": item.image or existing["image"]}
+        if item.release:
+            upd.update(release=item.release, release_date=item.release_date)
         old, new = existing["status"], item.status
         if new != UNKNOWN and new != old:
             upd.update(status=new, last_change=now)
@@ -235,19 +270,91 @@ class Monitor:
             if old not in (None, UNKNOWN) and self._worth_alarm(old, new) and not existing["watch_id"]:
                 self.db.add_event(None, "restock", f"{label}: wieder {STATUS_WORDS[new]} – {item.title}")
                 self._spawn(self._send(None, Message(
-                    f"🟢 Wieder verfügbar: {item.title}",
+                    ("🟢 Wieder verfügbar: " if new == AVAILABLE else "🟡 Jetzt vorbestellbar: ") + item.title,
                     " · ".join(p for p in (format_price(item.price, item.currency), shop["name"]) if p)
-                    + f"\nGefunden über „{search['query']}“",
+                    + f"\nGefunden über {label}",
                     item.url, image=item.image, loud=search["priority"] == "laut", kind="restock")))
         self.db.update_hit(existing["id"], **upd)
+
+    # ------------------------------------------------------------------ Schonmodus
+    def _schedule_watches(self, now: float) -> list[int]:
+        """Startet fällige Prüfungen. Ist das Budget eines Shops voll, wird verschoben statt gesendet."""
+        limit = self._budget()
+        planned: dict[str, int] = {}
+        started = []
+        for watch in self.db.due_watches(now):
+            if watch["id"] in self._running:
+                continue
+            host = host_key(watch["url"])
+            wait = self.fetcher.slot_wait(host, limit, planned.get(host, 0))
+            if wait:
+                self.db.update_watch(watch["id"], next_check=now + wait + random.uniform(0, 5))
+                continue
+            planned[host] = planned.get(host, 0) + 1
+            started.append(watch["id"])
+            self._spawn(self._guarded(watch))
+        return started
+
+    def _budget(self) -> int:
+        try:
+            return max(0, int(self.db.settings().get("shop_budget") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    async def _take_slot(self, host: str, patience: float = SLOT_PATIENCE) -> bool:
+        """Für Suchaufträge: kurz auf einen freien Platz warten, sonst diese Runde auslassen."""
+        wait = self.fetcher.slot_wait(host, self._budget())
+        if wait > patience:
+            return False
+        if wait:
+            await asyncio.sleep(wait)
+        return True
+
+    # ------------------------------------------------------------------ automatisch übernehmen
+    def _auto_room(self, search: dict) -> int:
+        taken = sum(1 for h in self.db.hits(search["id"]) if h["watch_id"])
+        return max(0, (search["max_auto"] or 30) - taken)
+
+    def _start_auto_watch(self, search: dict) -> None:
+        """„Alles, was gerade nicht kaufbar ist“: offene Treffer nach und nach als Produkte übernehmen."""
+        if search["id"] in self._auto_running:
+            return
+        room = self._auto_room(search)
+        today = datetime.now().date().isoformat()
+
+        def priority(hit: dict) -> tuple:
+            # Kommendes zuerst (Termin in der Zukunft, dann Vorverkauf), danach Ausverkauftes günstig vor teuer –
+            # sonst landen ausverkaufte Sammler-Raritäten vor dem nächsten Release.
+            upcoming = bool(hit["release_date"] and hit["release_date"] >= today)
+            group = 0 if upcoming else 1 if hit["status"] == PREORDER else 2
+            return group, hit["release_date"] or "9999", hit["price"] if hit["price"] is not None else 1e9
+
+        todo = sorted((h for h in self.db.hits(search["id"])
+                       if not h["watch_id"] and h["status"] in (SOLDOUT, PREORDER, UNKNOWN)), key=priority)[:room]
+        if todo:
+            self._auto_running.add(search["id"])
+            self._spawn(self._auto_watch_many(search, todo))
+
+    async def _auto_watch_many(self, search: dict, hits: list[dict]) -> None:
+        try:
+            for hit in hits:
+                try:
+                    while (wait := self.fetcher.slot_wait(host_key(hit["url"]), self._budget())):
+                        await asyncio.sleep(wait)       # Übernahmen dürfen warten – sie sind nicht eilig
+                    await self._auto_watch(hit["id"], hit["url"], search)
+                except Exception:                   # eine kaputte Seite darf die anderen nicht aufhalten
+                    log.exception("Automatische Übernahme fehlgeschlagen: %s", hit["url"])
+        finally:
+            self._auto_running.discard(search["id"])
 
     async def _auto_watch(self, hit_id: int, url: str, search: dict) -> None:
         res = await analyze(url, self.fetcher)
         if res.status == ERROR:
             self.db.add_event(None, "warning", f"Treffer konnte nicht übernommen werden: {res.reason}")
             return
-        watch = add_watch(self.db, res, priority=search["priority"],
-                          note=f"Automatisch aus Suche „{search['query']}“ übernommen")
+        fill_from_hit(res, self.db.hit(hit_id))
+        watch = add_watch(self.db, res, priority=search["priority"], interval=AUTO_INTERVAL, auto=True,
+                          note=f"Automatisch aus Suche „{search_label(search)}“ übernommen")
         self.db.update_hit(hit_id, watch_id=watch["id"])
 
     # ------------------------------------------------------------------ Nachrichten

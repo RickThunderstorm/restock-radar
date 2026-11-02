@@ -12,7 +12,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from urllib.parse import quote_plus, urlencode, urljoin, urlsplit
+from urllib.parse import parse_qsl, quote_plus, urlencode, urljoin, urlsplit
 
 import httpx
 from selectolax.lexbor import LexborHTMLParser, LexborNode
@@ -20,6 +20,7 @@ from selectolax.lexbor import LexborHTMLParser, LexborNode
 from .detect import (AVAILABLE, BLOCKED, QUEUE, SOLDOUT, UNKNOWN, _platform, _to_float, normalize_url,
                      schema_status, text_status)
 from .fetcher import Fetcher, Page
+from .release import find_release
 
 SEARCH_PARAMS = ("q", "s", "qs", "search", "query", "keyword", "keywords", "searchparam", "ssearch",
                  "suchbegriff", "term", "sword")
@@ -40,7 +41,36 @@ PRODUCT_TYPES = {
     "kollektion": {"label": "Kollektion / Box", "query": "kollektion",
                    "any": ["kollektion", "collection", "premium"], "not": []},
 }
+# Zubehör, das gern mit dem Produktnamen gelistet wird – bei einem gewählten Produkttyp nie ein Treffer
+# („Sleeves“ fehlt bewusst: viele Top-Trainer-Boxen werben im Titel mit den enthaltenen Hüllen.)
+ACCESSORIES = ["acryl", "acrylic", "magnetisch", "magnetic", "protector", "huelle", "huellen",
+               "schutzbox", "staender", "aufbewahrung", "storage", "binder", "ordner", "playmat", "spielmatte",
+               "toploader", "deckbox", "deck box", "leer", "empty"]
+# Ohne Suchbegriff („alle Pokémon-Produkte dieses Typs“) fliegen andere Sammelkartenspiele raus.
+OTHER_TCGS = ["yugioh", "yu gi oh", "magic the gathering", "mtg", "one piece", "lorcana", "digimon", "dragon ball",
+              "flesh and blood", "star wars unlimited", "weiss schwarz", "union arena", "riftbound", "gundam",
+              "metazoo", "sorcery"]
+BROAD_QUERY = "Pokémon"
+
+AUTO_OFF, AUTO_NEW, AUTO_UNAVAILABLE = 0, 1, 2
+AUTO_MODES = {AUTO_OFF: "Nein", AUTO_NEW: "Nur neue Treffer",
+              AUTO_UNAVAILABLE: "Alles, was gerade nicht kaufbar ist"}
+
+
+def search_categories(search: dict) -> list[str]:
+    return [line.strip() for line in (search.get("categories") or "").splitlines() if line.strip()]
+
+
+def search_label(search: dict) -> str:
+    """Name eines Suchauftrags für Meldungen: der Suchbegriff oder z. B. „Alle Pokémon · Display“."""
+    query = (search.get("query") or "").strip()
+    if query:
+        return query
+    ptype = PRODUCT_TYPES.get(search.get("ptype") or "egal")
+    return "Alle Pokémon" + (f" · {ptype['label']}" if ptype and ptype["any"] else "")
 LANGUAGES = {"egal": "Jede Sprache", "de": "Deutsch", "en": "Englisch", "jp": "Japanisch"}
+TRACKING_PARAMS = {"listtype", "searchparam", "delivery_alarm", "_pos", "_psq", "_ss", "_psid", "_sid", "srsltid",
+                   "sid", "force_sid", "spartner", "ref", "source"}
 LANG_MARKERS = {
     "de": ["deutsch", "german", "de", "dt"],
     "en": ["englisch", "english", "en", "eng"],
@@ -62,6 +92,8 @@ class Item:
     currency: str | None = None
     image: str | None = None
     status: str = UNKNOWN
+    release: str | None = None
+    release_date: str | None = None
 
 
 @dataclass
@@ -103,12 +135,14 @@ async def detect_shop(url: str, fetcher: Fetcher) -> ShopInfo:
 
 
 def _shop_name(tree: LexborHTMLParser, host: str) -> str:
+    """Kurzer Shopname: og:site_name, sonst das kürzeste Stück des Seitentitels, sonst die Domain."""
     node = tree.css_first('meta[property="og:site_name"]')
     name = (node.attributes.get("content") or "").strip() if node else ""
     if not name:
         title = tree.css_first("title")
-        name = re.split(r"\s[|–—-]\s", title.text(strip=True))[-1].strip() if title else ""
-    if not name or len(name) > 40:
+        parts = [p.strip() for p in re.split(r"\s[|–—-]\s", title.text(strip=True))] if title else []
+        name = min((p for p in parts if len(p) >= 3), key=len, default="")
+    if not name or "://" in name or name.lower().startswith("www.") or len(name) > 30 or len(name.split()) > 3:
         name = host.removeprefix("www.")
     return name
 
@@ -161,6 +195,80 @@ async def run_search(shop: dict, query: str, fetcher: Fetcher) -> list[Item]:
     return parse_cards(page.text, page.url)
 
 
+async def search_shop(shop: dict, search: dict, fetcher: Fetcher) -> list[Item]:
+    """Alle Schreibweisen eines Suchauftrags in einem Shop abfragen.
+
+    Mit Produkttyp-Wort („… display“) finden lockere Shopsuchen das Richtige schneller. Strenge
+    Suchen (alle Wörter Pflicht) liefern aber nichts, wenn der Shop anders benennt – dann einmal ohne.
+    """
+    items: list[Item] = []
+    for alt in alternatives(search["query"]) or [BROAD_QUERY]:
+        query = shop_query(alt, search.get("ptype") or "egal")
+        found = await run_search(shop, query, fetcher)
+        if not found and query != alt:
+            found = await run_search(shop, alt, fetcher)
+        items += found
+    return items
+
+
+async def fetch_category(url: str, fetcher: Fetcher, max_pages: int = 3) -> list[Item]:
+    """Liest eine Kategorie-Seite eines Shops (bis zu drei Seiten weit)."""
+    url = normalize_url(url)
+    parts = urlsplit(url)
+    if "/collections/" in parts.path:
+        # Shopify-Kategorie: die komplette Liste gibt es als JSON
+        base = f"{parts.scheme}://{parts.netloc}"
+        json_url = f"{base}{parts.path.rstrip('/')}/products.json?limit=100"
+        try:
+            page = await fetcher.get(json_url, json=True)
+            if page.status == 200 and not page.block:
+                found = _parse_shopify_products(page.text, base)
+                if found:                      # leer heißt bei manchen Shops nur „JSON abgeschaltet“
+                    return found
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            pass
+    items: list[Item] = []
+    visited: set[str] = set()
+    for _ in range(max_pages):
+        try:
+            page = await fetcher.get(url)
+        except httpx.HTTPError as exc:
+            raise SearchError("error", f"Kategorie-Seite nicht erreichbar ({type(exc).__name__})")
+        _raise_for(page)
+        if page.status >= 400:
+            raise SearchError("error", f"Kategorie-Seite antwortet mit Fehler {page.status}")
+        visited.add(url)
+        items += parse_cards(page.text, page.url)
+        url = _next_page(page.text, page.url)
+        if not url or url in visited:
+            break
+    return items
+
+
+def _next_page(text: str, base: str) -> str | None:
+    tree = LexborHTMLParser(text)
+    node = (tree.css_first('link[rel="next"]') or tree.css_first('a[rel="next"]')
+            or tree.css_first('a[aria-label*="ächste"], a[aria-label*="Next"], a[title*="ächste"]'))
+    href = node.attributes.get("href") if node else None
+    return urljoin(base, href) if href else None
+
+
+def _parse_shopify_products(text: str, base: str) -> list[Item]:
+    items = []
+    for p in json.loads(text)["products"]:
+        variants = p.get("variants") or []
+        images = p.get("images") or []
+        price = min((v for v in (_to_float(x.get("price")) for x in variants) if v is not None), default=None)
+        items.append(Item(
+            url=f"{base}/products/{p['handle']}",
+            title=html.unescape(p.get("title") or ""),
+            price=price, currency="EUR",
+            image=images[0].get("src") if images else None,
+            status=AVAILABLE if any(v.get("available") for v in variants) else SOLDOUT,
+        ))
+    return [i for i in items if i.title]
+
+
 def _raise_for(page: Page) -> None:
     if page.queue:
         raise SearchError(QUEUE, "Der Shop leitet in eine Warteschlange um – oft läuft gerade ein Drop.")
@@ -207,7 +315,7 @@ def _parse_woo(text: str) -> list[Item]:
 
 CARD_CLASSES = {"productbox", "product-box", "product-item", "product-card", "card-product", "product-tile",
                 "product-miniature", "grid-product", "product-grid-item", "productlist-item",
-                "product-list-item", "product-wrapper", "product"}
+                "product-list-item", "product-wrapper", "product-card-wrapper", "product"}
 SKIP_LINKS = ("cart", "warenkorb", "wishlist", "merkzettel", "compare", "vergleich", "login", "account",
               "javascript:", "mailto:")
 
@@ -240,13 +348,15 @@ def _card_item(card: LexborNode, base: str, host: str | None) -> Item | None:
         link = anchor.attributes.get("href") if anchor else None
     if not link or not _product_link(link):
         return None
-    url = urljoin(base, link).split("#")[0]
+    url = clean_url(urljoin(base, link))
     if urlsplit(url).hostname != host:
         return None
 
     title = _prop(card, "name")
     if not title:
-        node = card.css_first('[class*="title"]') or card.css_first('[class*="name"]')
+        # „card-title“, „product-title“ … – aber nicht „title-header“, der oft Zusatzangaben enthält
+        node = (card.css_first('[class$="title"], [class*="title "], [class$="-name"], [class*="-name "]')
+                or card.css_first('[class*="title"]') or card.css_first('[class*="name"]'))
         title = node.text(separator=" ", strip=True) if node else ""
     if not title:
         texts = [a.text(separator=" ", strip=True) for a in card.css("a[href]")]
@@ -260,15 +370,20 @@ def _card_item(card: LexborNode, base: str, host: str | None) -> Item | None:
 
     price = _to_float(_prop(card, "price"))
     if price is None:
-        m = re.search(r"(\d{1,4}(?:\.\d{3})*,\d{2})\s*(?:€|EUR)", raw) or re.search(r"€\s*(\d{1,4}(?:\.\d{3})*,\d{2})", raw)
-        price = _to_float(m.group(1)) if m else None
+        # „149,99 €“, „€ 149,99“ und auch „149 ,99 €“ (Euro und Cent getrennt gesetzt)
+        m = (re.search(r"(\d{1,4}(?:\.\d{3})*)\s*,\s*(\d{2})\s*(?:€|EUR)", raw)
+             or re.search(r"€\s*(\d{1,4}(?:\.\d{3})*)\s*,\s*(\d{2})", raw))
+        price = _to_float(f"{m.group(1)},{m.group(2)}") if m else None
+    if price is not None and price <= 0:
+        price = None                           # „0,00 €“ = Preis noch nicht bekannt (oft bei Vorbestellungen)
 
     status = UNKNOWN
     availability = _prop(card, "availability")
     if availability and schema_status(availability):
         status = schema_status(availability)
     else:
-        status = text_status(raw[:1500])[0] or UNKNOWN
+        # Titel mit prüfen: „… VORVERKAUF“ oder „(Vorbestellung)“ steht oft nur dort
+        status = text_status(f"{title} {raw[:1500]}")[0] or UNKNOWN
 
     image = _prop(card, "image")
     if not image:
@@ -277,8 +392,9 @@ def _card_item(card: LexborNode, base: str, host: str | None) -> Item | None:
             image = img.attributes.get("data-src") or img.attributes.get("src")
     image = urljoin(base, image) if image and not image.startswith("data:") else None
 
+    release, release_date = find_release(f"{title} {raw[:2000]}")
     return Item(url=url, title=title, price=price, currency=_prop(card, "priceCurrency") or "EUR",
-                image=image, status=status)
+                image=image, status=status, release=release, release_date=release_date)
 
 
 def _prop(card: LexborNode, name: str) -> str | None:
@@ -287,6 +403,14 @@ def _prop(card: LexborNode, name: str) -> str | None:
         return None
     value = node.attributes.get("content") or node.attributes.get("href") or node.text(separator=" ", strip=True)
     return value.strip() if value else None
+
+
+def clean_url(url: str) -> str:
+    """Entfernt Such- und Tracking-Anhängsel, damit derselbe Artikel immer denselben Link hat."""
+    parts = urlsplit(url.split("#")[0])
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+             if k.lower() not in TRACKING_PARAMS and not k.lower().startswith("utm_")]
+    return parts._replace(query=urlencode(query)).geturl()
 
 
 def _product_link(href: str) -> bool:
@@ -326,12 +450,17 @@ def matches(item: Item, search: dict) -> bool:
     slug = urlsplit(item.url).path.replace("/", " ")
     hay = normalize(f"{item.title} {slug}")
 
-    if not any(all(_has(hay, word) for word in normalize(alt).split()) for alt in alternatives(search["query"])):
+    alts = alternatives(search.get("query") or "")
+    if alts and not any(all(_has(hay, word) for word in normalize(alt).split()) for alt in alts):
+        return False
+    if not alts and any(_has(hay, other) for other in OTHER_TCGS):
         return False
     ptype = PRODUCT_TYPES.get(search.get("ptype") or "egal", PRODUCT_TYPES["egal"])
     if ptype["any"] and not any(_has(hay, p) for p in ptype["any"]):
         return False
     if any(_has(hay, p) for p in ptype["not"]):
+        return False
+    if ptype["any"] and any(_has(hay, p) for p in ACCESSORIES):
         return False
     if not _language_ok(hay, search.get("lang") or "egal"):
         return False

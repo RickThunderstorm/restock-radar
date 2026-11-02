@@ -62,6 +62,93 @@ def test_language_price_and_exclude():
     assert not search.matches(item("Prismatische Entwicklungen Nachtara PSA 10"), crit(exclude="psa, gradiert"))
 
 
+def test_accessories_never_count_as_product_type():
+    etb = {**crit(), "query": "Top Trainer Box", "ptype": "etb"}
+    assert not search.matches(item("The Acrylic Box-Premium für Pokémon Top Trainer Box (magnetisch)"), etb)
+    assert search.matches(item("Pokémon Center Top-Trainer-Box - Fatale Flammen"), etb)
+    assert search.matches(item("Top-Trainer-Box inkl. 65 Sleeves"), etb)
+    # ohne Produkttyp bleibt alles erlaubt
+    assert search.matches(item("Acryl-Case für Top Trainer Box"), {**crit(), "query": "Top Trainer Box"})
+
+
+OXID_HTML = """<div class="card product-card col-sm">
+  <img class="product-img" src="https://oxid.test/p/ttb.webp" alt="30 Jahre Pokémon - Top-Trainer-Box - deutsch">
+  <a href="https://oxid.test/pokemon/30-jahre-ttb.html?listtype=search&amp;searchparam=Top&amp;delivery_alarm=1" class="stretched-link"></a>
+  <a class="btn" href="https://oxid.test/index.php?cl=account&amp;anid=1">Merkzettel</a>
+  <div class="d-flex title-header"><div class="h5 card-title"> 30 Jahre Pokémon - Top-Trainer-Box - deutsch </div>
+    <div class="attributes"><ul><li>Sprache: Deutsch</li></ul></div></div>
+  <span class="price">149</span> <span class="cent">,99 €*</span> Aktuell nicht auf Lager.
+</div>"""
+
+
+def test_parse_cards_oxid_split_price_and_clean_link():
+    [card] = search.parse_cards(OXID_HTML, "https://oxid.test/index.php?cl=search")
+    assert card.title == "30 Jahre Pokémon - Top-Trainer-Box - deutsch"
+    assert card.price == 149.99 and card.status == "soldout"
+    assert card.url == "https://oxid.test/pokemon/30-jahre-ttb.html"
+
+
+def test_sold_out_presale_card_counts_as_sold_out():
+    # echte Karte von Gate-to-the-Games: Banner „Ausverkauft“, Titel „VORVERKAUF“, Knopf im HTML
+    html = ('<div class="product-wrapper" itemscope itemtype="https://schema.org/Product">'
+            '<meta itemprop="name" content="Delta Herrschaft Display (deutsch) VORVERKAUF">'
+            '<meta itemprop="url" content="https://jtl.test/delta"><div class="ribbon">Ausverkauft</div>'
+            'Verfügbar ab: 06.11.2026 239,90 € In den Warenkorb</div>')
+    [card] = search.parse_cards(html, "https://jtl.test/")
+    assert card.status == "soldout" and card.release == "06.11.2026" and card.price == 239.9
+
+
+def test_presale_card_without_price():
+    html = ('<div class="product-wrapper" itemscope itemtype="https://schema.org/Product">'
+            '<meta itemprop="name" content="Delta Herrschaft Top Trainer Box (deutsch) VORVERKAUF">'
+            '<meta itemprop="url" content="https://jtl.test/delta-ttb"><span itemprop="price" content="0.00"></span></div>')
+    [card] = search.parse_cards(html, "https://jtl.test/?qs=x")
+    assert card.status == "preorder" and card.price is None
+
+
+def test_clean_url_keeps_product_parameters():
+    assert search.clean_url("https://s.test/p?_pos=1&_psq=x&variant=5#top") == "https://s.test/p?variant=5"
+    assert search.clean_url("https://s.test/index.php?cl=details&anid=abc&utm_source=x") == \
+        "https://s.test/index.php?cl=details&anid=abc"
+
+
+def test_shop_name_heuristics():
+    from selectolax.lexbor import LexborHTMLParser
+    name = lambda html: search._shop_name(LexborHTMLParser(html), "www.laden.test")
+    assert name('<meta property="og:site_name" content="Kartenladen">') == "Kartenladen"
+    assert name('<meta property="og:site_name" content="https://laden.test/">') == "laden.test"
+    assert name("<title>Sammelkarten kaufen bei Card-Corner, Pokémon und mehr</title>") == "laden.test"
+    assert name("<title>Pokémon Displays | Kartenladen</title>") == "Kartenladen"
+
+
+def test_browser_check_pages_count_as_blocked():
+    def handler(request):
+        return httpx.Response(200, text="<html><title>Sicherheitspruefung</title>Kurze Sicherheitsprüfung – "
+                                        "Proof-of-Work wird berechnet. Bitte JavaScript aktivieren.</html>")
+    fetcher = Fetcher(min_gap=0, transport=httpx.MockTransport(handler))
+    try:
+        run(search.detect_shop("https://geschuetzt.test", fetcher))
+        assert False, "hätte als gesperrt gelten müssen"
+    except search.SearchError as err:
+        assert err.status == "blocked" and "Browser-Prüfung" in err.reason
+
+
+def test_strict_shop_search_retries_without_type_word():
+    asked = []
+
+    def handler(request):
+        asked.append(request.url.params["qs"])
+        if request.url.params["qs"].endswith("display"):
+            return httpx.Response(200, text="<html><body>Keine Treffer</body></html>")
+        return httpx.Response(200, text=JTL_HTML)
+
+    fetcher = Fetcher(min_gap=0, transport=httpx.MockTransport(handler))
+    shop = {"mode": "html", "search_url": "https://jtl.test/?qs={q}", "base": "https://jtl.test"}
+    items = run(search.search_shop(shop, crit(ptype="display", query="Prismatische Entwicklungen"), fetcher))
+    assert asked == ["Prismatische Entwicklungen display", "Prismatische Entwicklungen"]
+    assert len(items) == 2
+
+
 def test_shop_query_adds_type_word():
     assert search.shop_query("Prismatische Entwicklungen", "display") == "Prismatische Entwicklungen display"
     assert search.shop_query("Prismatische Display", "display") == "Prismatische Display"

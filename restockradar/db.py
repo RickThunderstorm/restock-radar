@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS watches (
@@ -101,16 +102,29 @@ CREATE TABLE IF NOT EXISTS hits (
 );
 """
 
+# Spalten, die nach Version 1.1 dazugekommen sind – bestehende Datenbanken bekommen sie beim Start.
+MIGRATIONS = [
+    ("watches", "release", "TEXT"),
+    ("watches", "release_date", "TEXT"),
+    ("watches", "auto", "INTEGER DEFAULT 0"),          # von einem Suchauftrag automatisch angelegt
+    ("hits", "release", "TEXT"),
+    ("hits", "release_date", "TEXT"),
+    ("searches", "categories", "TEXT DEFAULT ''"),     # Kategorie-Seiten, eine pro Zeile
+    ("searches", "max_auto", "INTEGER DEFAULT 30"),    # Obergrenze für automatisch überwachte Treffer
+    ("searches", "last_error", "TEXT"),
+]
+
 SHOP_FIELDS = {"name", "base", "platform", "mode", "search_url", "enabled", "status", "reason",
                "paused_until", "last_check"}
 SEARCH_FIELDS = {"query", "ptype", "lang", "max_price", "exclude", "priority", "auto_watch", "enabled",
-                 "interval", "baseline", "last_check", "next_check"}
+                 "interval", "baseline", "last_check", "next_check", "categories", "max_auto", "last_error"}
 HIT_FIELDS = {"search_id", "shop_id", "url", "title", "price", "currency", "image", "status", "is_new",
-              "watch_id", "first_seen", "last_seen", "last_change"}
+              "watch_id", "first_seen", "last_seen", "last_change", "release", "release_date"}
 
 DEFAULT_SETTINGS = {
     "setup_done": False,
     "default_interval": 60,
+    "shop_budget": 4,           # Schonmodus: höchstens so viele Anfragen pro Shop und Minute (0 = unbegrenzt)
     "heartbeat_enabled": True,
     "heartbeat_time": "09:00",
     "last_heartbeat": "",
@@ -127,7 +141,7 @@ WATCH_FIELDS = {
     "url", "name", "shop", "image", "price", "currency", "platform", "method", "variant_id",
     "variant_title", "cart_url", "status", "stock", "confidence", "rating", "reason", "note",
     "priority", "enabled", "interval", "error_count", "warned", "backoff", "last_check",
-    "last_change", "last_notified", "last_queue", "next_check",
+    "last_change", "last_notified", "last_queue", "next_check", "release", "release_date", "auto",
 }
 
 
@@ -138,6 +152,10 @@ class Database:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(SCHEMA)
+            for table, column, kind in MIGRATIONS:
+                existing = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+                if column not in existing:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
             self._conn.commit()
 
     def _exec(self, sql: str, params=()) -> sqlite3.Cursor:
@@ -211,6 +229,11 @@ class Database:
     def shops(self) -> list[dict]:
         return self._rows("SELECT * FROM shops ORDER BY name COLLATE NOCASE")
 
+    def shop_by_host(self, host: str) -> dict | None:
+        host = (host or "").removeprefix("www.")
+        return next((s for s in self.shops()
+                     if (urlsplit(s["base"]).hostname or "").removeprefix("www.") == host), None)
+
     def shop_by_base(self, base: str) -> dict | None:
         rows = self._rows("SELECT * FROM shops WHERE base = ?", (base,))
         return rows[0] if rows else None
@@ -256,7 +279,9 @@ class Database:
         return self._rows(
             "SELECT h.*, s.name AS shop_name FROM hits h LEFT JOIN shops s ON s.id = h.shop_id "
             "WHERE h.search_id = ? ORDER BY "
-            "CASE h.status WHEN 'available' THEN 0 WHEN 'preorder' THEN 1 ELSE 2 END, h.first_seen DESC",
+            # Kommendes zuerst, dann Kaufbares; günstig vor teuer, damit Sammler-Raritäten nicht alles verdecken
+            "CASE h.status WHEN 'preorder' THEN 0 WHEN 'available' THEN 1 ELSE 2 END, "
+            "h.release_date IS NULL, h.release_date, h.price IS NULL, h.price, h.first_seen DESC",
             (search_id,))
 
     # ------------------------------------------------------------------ Verlauf
